@@ -2,8 +2,10 @@
 import ij.IJ;
 import ij.ImagePlus;
 import ij.io.FileSaver;
+import ij.plugin.RGBStackMerge;
 import ij.plugin.ZProjector;
 
+import ij.process.ImageConverter;
 import mpicbg.models.AffineModel2D;
 import mpicbg.models.NotEnoughDataPointsException;
 import mpicbg.models.IllDefinedDataPointsException;
@@ -13,6 +15,8 @@ import net.imagej.ops.OpService;
 import org.apache.commons.math3.linear.MatrixUtils;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.menu.MenuConstants;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -22,6 +26,12 @@ import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.UUID;
 
+/*
+@Plugin(type = Command.class, label = "smFRET Channel Mapping", menu = {
+        @Menu(label = MenuConstants.PLUGINS_LABEL, weight = 1, mnemonic = MenuConstants.PLUGINS_MNEMONIC),
+        @Menu(label = "smFRET Analysis", weight = 1, mnemonic = 'r'),
+        @Menu(label = "smFRET Channel Mapping", weight = 1) })
+ */
 @Plugin(type = Command.class, headless = true,
         menuPath = "Plugins>smFRET>smFRET Channel Mapping")
 public class smFRETAnalyzer implements Command {
@@ -47,9 +57,9 @@ public class smFRETAnalyzer implements Command {
     /**
      * Copied from MultiStackReg_.java.
      */
-    String saveTempImageFile(ImagePlus sourceImg){
+    private String saveTempImageFile(ImagePlus sourceImg){
         FileSaver sourceFile = new FileSaver(sourceImg);
-        String sourcePathAndFileName = IJ.getDirectory("temp") + UUID.randomUUID() + sourceImg.getTitle();
+        String sourcePathAndFileName = IJ.getDirectory("temp") + "-" + UUID.randomUUID() + "-" + sourceImg.getTitle();
         sourceFile.saveAsTiff(sourcePathAndFileName);
         return sourcePathAndFileName;
     }
@@ -65,42 +75,68 @@ public class smFRETAnalyzer implements Command {
 
         try {
             // Calculate average image.
-            ImagePlus averageImage = ZProjector.run(img, "ave", startFrame, endFrame);
+            //
+            // FIXME: Block or possibly handle RGB images.
+            //
+            log.info("calculating average image and splitting - " + img.getNSlices() + " slices");
+            ImagePlus averageImage;
+            if (img.getNSlices() == 1){
+                averageImage = img.duplicate();
+            }
+            else {
+                // Assuming that ZProjector uses 1 based indexing.
+                if (startFrame < 1){ startFrame = 1;}
+                if (startFrame > (img.getNFrames()-1)){ startFrame = img.getNFrames() - 1;}
+                if (endFrame < startFrame){ endFrame = startFrame + 1;}
+                if (endFrame > img.getNFrames()){ endFrame = img.getNFrames();}
+
+                log.info("averaging slices " + startFrame + " to " + endFrame);
+                averageImage = ZProjector.run(img, "ave", startFrame, endFrame);
+            }
 
             // Split average vertically.
-            log.info("calculating average image");
+            //
+            // I spent a lot of time trying to figure out how to do this in memory in a way that was compatible
+            // with TurboReg_ and finally gave up. It refused to use any ImagePlus objects whose titles
+            // where changed, why IDK, so save images to temporary files following MultiStackReg_.
+            //
             int hw = averageImage.getWidth()/2;
 
+            // Target image, left half, not transformed.
             averageImage.setRoi(0,0,hw,averageImage.getHeight());
+            ImagePlus averageImageTarget = averageImage.crop().duplicate();
+            averageImageTarget.setTitle("average_image_target");
+            String averageImageTargetFilename = saveTempImageFile(averageImageTarget);
+            log.info("target image " + averageImageTargetFilename);
+
+            // Source image, right half, transformed.
+            averageImage.setRoi(hw,0,hw,averageImage.getHeight());
             ImagePlus averageImageSource = averageImage.crop().duplicate();
             averageImageSource.setTitle("average_image_source");
             String averageImageSourceFilename = saveTempImageFile(averageImageSource);
             log.info("source image " + averageImageSourceFilename);
 
-            averageImage.setRoi(hw,0,hw,averageImage.getHeight());
-            ImagePlus averageImageTarget = averageImage.crop().duplicate();
-            averageImageTarget.setTitle("average_image_target");
-            String averageImageTargetFilename = saveTempImageFile(averageImageTarget );
-            log.info("target image " + averageImageTargetFilename);
-
-            if (true) {
-                ui.show(averageImageSource);
-                ui.show(averageImageTarget);
-            }
+            ui.show(averageImageTarget);
+            ui.show(averageImageSource);
 
             // Find correspondence using TurboReg.
-            // I much preferred version 2.0.0 where you didn't have to specify landmarks.
             //
-            int iw = averageImageSource.getWidth();
-            int ih = averageImageSource.getWidth();
+            // 'Landmark' coordinates are arranged in a triangle on the image, is this optimal?
+            //
+            String crop = " 0 0 " + (averageImageSource.getWidth() - 1) + " " + (averageImageSource.getHeight() - 1);
+            int iw = averageImageSource.getWidth()/4;
+            int ih = averageImageSource.getWidth()/4;
+            String coords0 = " " + 2*iw + " " + ih + " " + 2*iw + " " + ih;
+            String coords1 = " " + iw + " " + 3*ih + " " + iw + " " + 3*ih;
+            String coords2 = " " + 3*iw + " " + 3*ih + " " + 3*iw + " " + 3*ih;
 
             log.info("identifying correspondence");
             String options = "-align"
                     + " -file " + averageImageSourceFilename
-                    + " 0 0 " + (averageImageSource.getWidth() - 1) + " " + (averageImageSource.getHeight() - 1)
+                    + crop
                     + " -file " + averageImageTargetFilename
-                    + " 0 0 " + (averageImageTarget.getWidth() - 1) + " " + (averageImageTarget.getHeight() - 1)
-                    + " -affine 10 10 10 10 " + (ih - 10) + " 10 " + (ih - 10) + " 10 10 " + (iw - 10) + " 10 " + (iw - 10)
+                    + crop
+                    + " -affine" + coords0 + coords1 + coords2
                     + " -hideOutput";
             Object turboRegObject = IJ.runPlugIn("TurboReg_", options);
 
@@ -121,9 +157,25 @@ public class smFRETAnalyzer implements Command {
             Arrays.fill(w, 1.0);
             model.fit(sourcePointsT, targetPointsT, w);
             log.info(model);
-            //for (e in b) {
-            //    println(model.applyInverse((double[]) e));
-            //}
+
+            // Warp target image to source, convert Gray8 and overlay for user QC.
+            log.info("calculating QC image");
+            method = turboRegObject.getClass().getMethod("getTransformedImage", null);
+            ImagePlus transformedSource = (ImagePlus)method.invoke(turboRegObject, null);
+
+            ImageConverter icSource = new ImageConverter(transformedSource);
+            icSource.convertToGray8();
+
+            ImageConverter icTarget = new ImageConverter(averageImageTarget);
+            icTarget.convertToGray8();
+
+            ImagePlus[] channels = new ImagePlus[3];
+            channels[0] = averageImageTarget; // Red
+            channels[1] = null; // Green
+            channels[2] = transformedSource; // Blue
+
+            ImagePlus rgbImageQCImage = RGBStackMerge.mergeChannels(channels, false);
+            ui.show(rgbImageQCImage);
 
             log.info("ending channel mapping");
 

@@ -1,11 +1,19 @@
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.*;
+
 import ij.IJ;
 import ij.ImagePlus;
 import ij.io.FileSaver;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.ZProjector;
-
 import ij.process.ImageConverter;
+
 import mpicbg.models.AffineModel2D;
 import mpicbg.models.NotEnoughDataPointsException;
 import mpicbg.models.IllDefinedDataPointsException;
@@ -21,10 +29,6 @@ import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.util.Arrays;
-import java.util.UUID;
 
 /*
 @Plugin(type = Command.class, label = "smFRET Channel Mapping", menu = {
@@ -36,8 +40,8 @@ import java.util.UUID;
         menuPath = "Plugins>smFRET>smFRET Channel Mapping")
 public class smFRETAnalyzer implements Command {
 
-    @Parameter
-    OpService ops;
+    //@Parameter
+    //OpService ops;
 
     @Parameter
     LogService log;
@@ -53,6 +57,32 @@ public class smFRETAnalyzer implements Command {
 
     @Parameter
     Integer endFrame;
+
+    @Parameter(label = "Save Directory", style = "directory")
+    File saveDirectory;
+
+    /**
+     * Load an existing mapping file to initialize transformString.
+     */
+    private String transformString = null;
+    public void loadMappingJSON(File mappingFileName) {
+        try {
+            ObjectMapper mapper = new ObjectMapper();
+
+            Map<String, Object> mapping = mapper.readValue(mappingFileName, HashMap.class);
+            ArrayList<ArrayList <Double>> sourcePoints = (ArrayList) mapping.get("source points");
+            ArrayList<ArrayList <Double>> targetPoints = (ArrayList) mapping.get("target points");
+
+            this.transformString = sourcePoints.get(0).get(0) + " " + sourcePoints.get(0).get(1)
+                                + " " + targetPoints.get(0).get(0) + " " + targetPoints.get(0).get(1)
+                                + " " + sourcePoints.get(1).get(0) + " " + sourcePoints.get(1).get(1)
+                                + " " + targetPoints.get(1).get(0) + " " + targetPoints.get(1).get(1)
+                                + " " + sourcePoints.get(2).get(0) + " " + sourcePoints.get(2).get(1)
+                                + " " + targetPoints.get(2).get(0) + " " + targetPoints.get(2).get(1);
+        } catch (Exception e) {
+            log.info(e);
+        }
+    }
 
     /**
      * Copied from MultiStackReg_.java.
@@ -149,14 +179,16 @@ public class smFRETAnalyzer implements Command {
             double[][] targetPoints = (double[][]) method.invoke(turboRegObject, null);
             log.info(sourcePoints.length + " " + targetPoints[0].length);
 
+            /*
             double[][] sourcePointsT = MatrixUtils.createRealMatrix(sourcePoints).transpose().getData();
             double[][] targetPointsT = MatrixUtils.createRealMatrix(targetPoints).transpose().getData();
-
             AffineModel2D model = new AffineModel2D();
+
             double[] w = new double[sourcePointsT[0].length];
             Arrays.fill(w, 1.0);
             model.fit(sourcePointsT, targetPointsT, w);
             log.info(model);
+             */
 
             // Warp target image to source, convert Gray8 and overlay for user QC.
             log.info("calculating QC image");
@@ -177,15 +209,42 @@ public class smFRETAnalyzer implements Command {
             ImagePlus rgbImageQCImage = RGBStackMerge.mergeChannels(channels, false);
             ui.show(rgbImageQCImage);
 
+            log.info("saving results to " + saveDirectory);
+
+            // Save QC image.
+            FileSaver sourceFile = new FileSaver(rgbImageQCImage);
+            String pathAndFileName = saveDirectory.getAbsolutePath() + File.separator + "mapping_qc_image.tif";
+            log.info(pathAndFileName);
+            sourceFile.saveAsTiff(pathAndFileName);
+
+            // Save mapping as JSON.
+            Map<String, Object> mapping = new HashMap<>();
+            mapping.put("source points", sourcePoints);
+            mapping.put("target points", targetPoints);
+
+            ObjectMapper mapper = new ObjectMapper();
+            File saveFile = new File(saveDirectory, "mapping.json");
+            mapper.writeValue(saveFile, mapping);
+
             log.info("ending channel mapping");
 
+            // Method debug code.
+            loadMappingJSON(saveFile);
+            log.info(this.transformString);
+
             // UI for user verification of found transform.
+        } catch (Exception e) {
+            log.info(e);
+        }
+/*
         } catch (NoSuchMethodException |
                  IllegalAccessException |
                  InvocationTargetException |
-                 NotEnoughDataPointsException |
-                 IllDefinedDataPointsException e){
+                 // NotEnoughDataPointsException
+                 // IllDefinedDataPointsException
+                 IOException e){
             log.info(e);
         }
+*/
     }
 }

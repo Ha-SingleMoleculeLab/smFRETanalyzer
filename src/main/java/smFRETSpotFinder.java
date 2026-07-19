@@ -1,5 +1,5 @@
 /*
- * This class handles extracts the time traces using the mapping and spot locations.
+ * This class finds the single molecule spots using the mapping.
  */
 
 import ij.IJ;
@@ -12,13 +12,8 @@ import org.scijava.ui.UIService;
 
 
 @Plugin(type = Command.class, headless = true,
-        menuPath = "Plugins>smFRET>smFRET Time Traces")
-public class smFRETAnalyzer implements Command {
-
-    // Parameters.
-    //@Parameter
-    //OpService ops;
-
+        menuPath = "Plugins>smFRET>smFRET Spot Finder")
+public class smFRETSpotFinder implements Command {
     @Parameter
     LogService log;
 
@@ -40,8 +35,8 @@ public class smFRETAnalyzer implements Command {
     @Override
     public void run() {
         try {
-	    log.info("starting time trace measurement");
-	    log.info("finishing time trace measurement");
+	    log.info("starting spot finding");
+	    log.info("finishing spot finding");
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

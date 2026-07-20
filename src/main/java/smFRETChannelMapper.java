@@ -59,23 +59,23 @@ public class smFRETChannelMapper implements Command {
      */
     public ImagePlus averageImagePlus(ImagePlus image, int iStart, int iEnd) {
 
-        // FIXME: Images could have frames instead of slices?
+        // FIXME: ImagePlus image could have frames instead of slices?
 
         // Assuming that ZProjector uses 1 based indexing.
         if (iStart < 1) { iStart = 1; }
         if (iStart > (image.getNSlices() - 1)) { iStart = image.getNSlices() - 1; }
-        if (iEnd < iStart) { iEnd = iStart + 1; }
+        if (iEnd < (iStart+1)) { iEnd = iStart + 1; }
         if (iEnd > image.getNSlices()) { iEnd = image.getNSlices(); }
 
         log.info("averaging slices " + iStart + " to " + iEnd);
-        ImagePlus averageImage = ZProjector.run(img, "ave", iStart, iEnd);
+        ImagePlus averageImage = ZProjector.run(image, "ave", iStart, iEnd);
         return averageImage;
     }
 
     /**
      * Load an existing mapping file to initialize transformString and image size.
      */
-    private String transformString = null;      // Transform string to pass to TurborReg.
+    private String transformString = null;      // Transform string to pass to TurboReg.
     private int mapImageWidth = 0;              // Expected image width for the transform.
     private int mapImageHeight = 0;             // Expected image height for the transform.
     public void loadMappingJSON(File mappingFileName) {
@@ -172,12 +172,9 @@ public class smFRETChannelMapper implements Command {
                     + " -affine " + this.transformString
                     + " -hideOutput";
 
-            log.info(options);
-
             Object turboRegObject = IJ.runPlugIn("TurboReg_", options);
             Method method = turboRegObject.getClass().getMethod("getTransformedImage", null);
             transformedImage = (ImagePlus) method.invoke(turboRegObject, null);
-
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);
@@ -226,10 +223,12 @@ public class smFRETChannelMapper implements Command {
             String averageImageSourceFilename = saveTempImageFile(averageImageSource);
             log.info("source image " + averageImageSourceFilename);
 
+            /*
             if (!this.isHeadless) {
                 ui.show(averageImageTarget);
                 ui.show(averageImageSource);
             }
+            */
 
             // Find correspondence using TurboReg.
             //
@@ -285,7 +284,7 @@ public class smFRETChannelMapper implements Command {
             File saveFile = new File(saveDirectory, "mapping.json");
             mapper.writeValue(saveFile, mapping);
 
-            // We could have just loaded the transformed image from the current turboRegObject
+            // We could have just loaded the transformed image from the current turboRegObject,
             // but we go the more complicated route to also test the other functionality of
             // this class.
             //

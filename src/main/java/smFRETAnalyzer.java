@@ -40,8 +40,8 @@ public class smFRETAnalyzer implements Command {
     @Override
     public void run() {
         try {
-	    log.info("starting time trace measurement");
-	    log.info("finishing time trace measurement");
+            log.info("starting time trace measurement");
+            log.info("finishing time trace measurement");
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

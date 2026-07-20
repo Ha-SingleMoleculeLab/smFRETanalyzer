@@ -41,17 +41,36 @@ public class smFRETChannelMapper implements Command {
     @Parameter
     ImagePlus img;
 
-    @Parameter
-    Integer startFrame;
+    @Parameter (description = "first slice for averaging", min = "1")
+    Integer startSlice = 1;
 
-    @Parameter
-    Integer endFrame;
+    @Parameter (description = "last slice for averaging", min = "1")
+    Integer endSlice = 30;
 
-    @Parameter(label = "Save Directory", style = "directory")
+    @Parameter(description = "Directory to save results in", label = "Save Directory", style = "directory")
     File saveDirectory;
 
     // Member variables.
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
+    private final String workingImagePathAndFileName = IJ.getDirectory("temp") + "-" + UUID.randomUUID() + "-scratch.tif";
+
+    /**
+     * Average an ImagePlus image stack.
+     */
+    public ImagePlus averageImagePlus(ImagePlus image, int iStart, int iEnd) {
+
+        // FIXME: Images could have frames instead of slices?
+
+        // Assuming that ZProjector uses 1 based indexing.
+        if (iStart < 1) { iStart = 1; }
+        if (iStart > (image.getNSlices() - 1)) { iStart = image.getNSlices() - 1; }
+        if (iEnd < iStart) { iEnd = iStart + 1; }
+        if (iEnd > image.getNSlices()) { iEnd = image.getNSlices(); }
+
+        log.info("averaging slices " + iStart + " to " + iEnd);
+        ImagePlus averageImage = ZProjector.run(img, "ave", iStart, iEnd);
+        return averageImage;
+    }
 
     /**
      * Load an existing mapping file to initialize transformString and image size.
@@ -81,10 +100,11 @@ public class smFRETChannelMapper implements Command {
         }
     }
 
-    /*
-     * Split the input image vertically and return as a two element list (target, source).
+    /**
+     * Split a (single frame) ImagePlus image vertically and return as a two element list (target, source).
+     * Or maybe this would just process the first frame anyway?
      */
-    public java.util.List<ImagePlus> splitImage(ImagePlus image, boolean transform){
+    public java.util.List<ImagePlus> splitImagePlus(ImagePlus image, boolean transform){
 
         // Record or check that the image size is correct for the current mapping.
         if (this.mapImageWidth == 0) {
@@ -112,7 +132,7 @@ public class smFRETChannelMapper implements Command {
 
         // Transform source if requested.
         if (transform) {
-            log.info("transforming image");
+            imageSource = transformImagePlus(imageSource);
         }
 
         // Image stack in order target, source.
@@ -134,12 +154,44 @@ public class smFRETChannelMapper implements Command {
     }
 
     /**
+     * Transform an ImagePlus image with the current transform.
+     */
+    private ImagePlus transformImagePlus(ImagePlus image){
+        if (this.transformString == null) {
+            throw new smFRETAnalysisException("Error: Cannot transform image, transform string not set");
+        }
+
+        ImagePlus transformedImage = null;
+        try {
+            FileSaver sourceFile = new FileSaver(image);
+            sourceFile.saveAsTiff(this.workingImagePathAndFileName);
+
+            String options = " -transform"
+                    + " -file " + this.workingImagePathAndFileName
+                    + " " + image.getWidth() + " " + image.getHeight()
+                    + " -affine " + this.transformString
+                    + " -hideOutput";
+
+            log.info(options);
+
+            Object turboRegObject = IJ.runPlugIn("TurboReg_", options);
+            Method method = turboRegObject.getClass().getMethod("getTransformedImage", null);
+            transformedImage = (ImagePlus) method.invoke(turboRegObject, null);
+
+        } catch (Exception e) {
+            log.info(e);
+            IJ.handleException(e);
+        }
+        return transformedImage;
+    }
+
+    /**
      * Run the mapping identification process
      */
     @Override
     public void run() {
         try {
-	    log.info("starting channel mapping " + img.getHeight() + " " + img.getWidth());
+	        log.info("starting channel mapping " + img.getHeight() + " " + img.getWidth());
 	    
             // Calculate average image.
             //
@@ -151,14 +203,7 @@ public class smFRETChannelMapper implements Command {
                 averageImage = img.duplicate();
             }
             else {
-                // Assuming that ZProjector uses 1 based indexing.
-                if (startFrame < 1){ startFrame = 1;}
-                if (startFrame > (img.getNFrames()-1)){ startFrame = img.getNFrames() - 1;}
-                if (endFrame < startFrame){ endFrame = startFrame + 1;}
-                if (endFrame > img.getNFrames()){ endFrame = img.getNFrames();}
-
-                log.info("averaging slices " + startFrame + " to " + endFrame);
-                averageImage = ZProjector.run(img, "ave", startFrame, endFrame);
+                averageImage = averageImagePlus(img, startSlice, endSlice);
             }
 
             // Split average vertically.
@@ -167,7 +212,7 @@ public class smFRETChannelMapper implements Command {
             // with TurboReg_ and finally gave up. It refused to use any ImagePlus objects whose titles
             // where changed, why IDK, so save images to temporary files following MultiStackReg_.
             //
-            java.util.List<ImagePlus> images = splitImage(averageImage, false);
+            java.util.List<ImagePlus> images = splitImagePlus(averageImage, false);
 
             // Target image.
             ImagePlus averageImageTarget = images.get(0);
@@ -227,11 +272,33 @@ public class smFRETChannelMapper implements Command {
             model.fit(sourcePointsT, targetPointsT, w);
             log.info(model);
              */
+            log.info("saving results to " + saveDirectory);
+
+            // Save mapping and expected image size as JSON.
+            Map<String, Object> mapping = new HashMap<>();
+            mapping.put("source points", sourcePoints);
+            mapping.put("target points", targetPoints);
+            mapping.put("image width", averageImage.getWidth());
+            mapping.put("image height", averageImage.getHeight());
+
+            ObjectMapper mapper = new ObjectMapper();
+            File saveFile = new File(saveDirectory, "mapping.json");
+            mapper.writeValue(saveFile, mapping);
+
+            // We could have just loaded the transformed image from the current turboRegObject
+            // but we go the more complicated route to also test the other functionality of
+            // this class.
+            //
+            // reload mapping to initialize transform string.
+            //
+            loadMappingJSON(saveFile);
 
             // Warp target image to source, convert Gray8 and overlay for user QC.
             log.info("calculating QC image");
-            method = turboRegObject.getClass().getMethod("getTransformedImage", null);
-            ImagePlus transformedSource = (ImagePlus)method.invoke(turboRegObject, null);
+            ImagePlus transformedSource = transformImagePlus(averageImageSource);
+
+//            method = turboRegObject.getClass().getMethod("getTransformedImage", null);
+//            ImagePlus transformedSource = (ImagePlus)method.invoke(turboRegObject, null);
 
             ImageConverter icSource = new ImageConverter(transformedSource);
             icSource.convertToGray8();
@@ -249,24 +316,11 @@ public class smFRETChannelMapper implements Command {
                 ui.show(rgbImageQCImage);
             }
 
-            log.info("saving results to " + saveDirectory);
-
             // Save QC image.
             FileSaver sourceFile = new FileSaver(rgbImageQCImage);
             String pathAndFileName = saveDirectory.getAbsolutePath() + File.separator + "mapping_qc_image.tif";
             log.info(pathAndFileName);
             sourceFile.saveAsTiff(pathAndFileName);
-
-            // Save mapping and expected image size as JSON.
-            Map<String, Object> mapping = new HashMap<>();
-            mapping.put("source points", sourcePoints);
-            mapping.put("target points", targetPoints);
-            mapping.put("image width", averageImage.getWidth());
-            mapping.put("image height", averageImage.getHeight());
-
-            ObjectMapper mapper = new ObjectMapper();
-            File saveFile = new File(saveDirectory, "mapping.json");
-            mapper.writeValue(saveFile, mapping);
 
             log.info("finishing channel mapping");
 

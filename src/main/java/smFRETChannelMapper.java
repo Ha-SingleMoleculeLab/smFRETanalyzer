@@ -39,7 +39,7 @@ public class smFRETChannelMapper implements Command {
     UIService ui;
 
     @Parameter
-    ImagePlus img;
+    ImagePlus inputImage;
 
     @Parameter (description = "first slice for averaging", min = "1")
     Integer startSlice = 1;
@@ -47,7 +47,7 @@ public class smFRETChannelMapper implements Command {
     @Parameter (description = "last slice for averaging", min = "1")
     Integer endSlice = 30;
 
-    @Parameter(description = "Directory to save results in", label = "Save Directory", style = "directory")
+    @Parameter(description = "directory to save results in", label = "save directory", style = "directory")
     File saveDirectory;
 
     // Member variables.
@@ -60,6 +60,10 @@ public class smFRETChannelMapper implements Command {
     public ImagePlus averageImagePlus(ImagePlus image, int iStart, int iEnd) {
 
         // FIXME: ImagePlus image could have frames instead of slices?
+
+        if (image.getNSlices() == 1){
+            return image.duplicate();
+        }
 
         // Assuming that ZProjector uses 1 based indexing.
         if (iStart < 1) { iStart = 1; }
@@ -103,6 +107,8 @@ public class smFRETChannelMapper implements Command {
     /**
      * Split a (single frame) ImagePlus image vertically and return as a two element list (target, source).
      * Or maybe this would just process the first frame anyway?
+     *
+     * FIXME: Can return as <ImagePlus,ImagePlus>?
      */
     public java.util.List<ImagePlus> splitImagePlus(ImagePlus image, boolean transform){
 
@@ -145,6 +151,7 @@ public class smFRETChannelMapper implements Command {
 
     /**
      * Copied from MultiStackReg_.java.
+     * https://github.com/miura/MultiStackRegistration
      */
     private String saveTempImageFile(ImagePlus sourceImg){
         FileSaver sourceFile = new FileSaver(sourceImg);
@@ -188,20 +195,14 @@ public class smFRETChannelMapper implements Command {
     @Override
     public void run() {
         try {
-	        log.info("starting channel mapping " + img.getHeight() + " " + img.getWidth());
+	        log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
 	    
             // Calculate average image.
             //
             // FIXME: Block or possibly handle RGB images.
             //
-            log.info("calculating average image and splitting - " + img.getNSlices() + " slices");
-            ImagePlus averageImage;
-            if (img.getNSlices() == 1){
-                averageImage = img.duplicate();
-            }
-            else {
-                averageImage = averageImagePlus(img, startSlice, endSlice);
-            }
+            log.info("calculating average image and splitting - " + inputImage.getNSlices() + " slices");
+            ImagePlus averageImage = averageImagePlus(inputImage, startSlice, endSlice);
 
             // Split average vertically.
             //

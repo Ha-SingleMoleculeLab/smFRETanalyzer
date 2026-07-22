@@ -85,24 +85,6 @@
             <id>scijava.public</id>
             <url>https://maven.scijava.org/content/repositories/public/</url>
         </repository>
-        <!--
-        <repository>
-            <id>scijava.public</id>
-            <url>https://maven.scijava.org/content/groups/public</url>
-        </repository>
-        -->
-        <!--
-        <repository>
-            <id>scijava.public</id>
-            <url>https://scijava.org</url>
-            <releases>
-                <enabled>true</enabled>
-            </releases>
-            <snapshots>
-                <enabled>false</enabled>
-            </snapshots>
-        </repository>
-        -->
     </repositories>
 
     <dependencies>
@@ -115,22 +97,15 @@
             <artifactId>imglib2-ij</artifactId>
         </dependency>
         <dependency>
-            <groupId>net.imagej</groupId>
-            <artifactId>imagej-legacy</artifactId>
-        </dependency>
-        <!--
-        <dependency>
-            <groupId>sc.fiji</groupId>
-            <artifactId>TurboReg_</artifactId>
-            <version>2.0.0</version>
-            <scope>jar</scope>
-        </dependency>
-        -->
-        <dependency>
             <groupId>mpicbg</groupId>
             <artifactId>mpicbg</artifactId>
             <version>1.6.6</version>
             <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.14.0</version>
         </dependency>
     </dependencies>
 </project>

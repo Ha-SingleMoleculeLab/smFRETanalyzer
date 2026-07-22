@@ -2,24 +2,32 @@
  * This class finds the single molecule spots using the mapping.
  */
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.io.FileInfo;
 import ij.io.FileSaver;
+import ij.io.Opener;
+import ij.measure.ResultsTable;
+import ij.plugin.Concatenator;
 import ij.plugin.ImageCalculator;
 import ij.plugin.filter.MaximumFinder;
 import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
+import net.imglib2.algorithm.componenttree.pixellist.PixelList;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
+import org.slf4j.IMarkerFactory;
 
 import java.awt.*;
 import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
 
 
 @Plugin(type = Command.class, headless = true,
@@ -31,8 +39,11 @@ public class smFRETSpotFinder implements Command {
     @Parameter
     UIService ui;
 
-    @Parameter
-    ImagePlus inputImage;
+    @Parameter(description = "image stack to analyze", label = "Image", style = "open")
+    File inputImageName;
+
+    @Parameter(description = "channel to channel mapping file", label = "mapping file", style = "open")
+    File mappingFile;
 
     @Parameter (description = "first slice for averaging", min = "1")
     Integer startSlice = 1;
@@ -43,29 +54,26 @@ public class smFRETSpotFinder implements Command {
     @Parameter (description = "spot size detection threshold", min = "1.0")
     Double spotThreshold = 8.0;
 
-    @Parameter (description = "spot size (sigma)", min = "0.2")
-    Double spotSigma = 1.5;
+    @Parameter (description = "spot size (sigma, pixels)", min = "0.2")
+    Double spotSigma = 2.0;
 
-    @Parameter (description = "camera offset / black level", min = "1")
-    Integer cameraBlackLevel = 1;
+    @Parameter (description = "camera offset / black level", min = "0")
+    Integer cameraBlackLevel = 0;
 
     @Parameter (description = "camera gain (e-/ADU)", min = "0.1")
     Double cameraGain = 1.0;
 
-    @Parameter(description = "channel to channel mapping file", label = "mapping file", style = "open")
-    File mappingFile;
-
-    @Parameter(description = "directory to save results in", label = "save directory", style = "directory")
-    File saveDirectory;
-
-    @Parameter (description = "minimum allowed distance between spots", min = "1")
+    @Parameter (description = "minimum allowed distance between spots (pixels)", min = "1")
     Integer spotSpacing = 5;
 
-    @Parameter (description = "margin around the edge of the channels", min = "1")
+    @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
 
     // Member variables.
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
+    public ImagePlus backgroundMask;
+    public ImagePlus overlapMask;
+    private smFRETChannelMapper smfcm = new smFRETChannelMapper();  // smFREChannelMapper object.
 
     /**
      * Estimate background of an image.
@@ -74,8 +82,6 @@ public class smFRETSpotFinder implements Command {
      * is masked out, and then we fill in the missing values using a simple inpainting procedure, repeated
      * convolution of the image with a Gaussian.
      */
-    private ImagePlus backgroundMask;
-    private ImagePlus overlapMask;
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImagePlus backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
         backgroundImage = maskInpaint(backgroundImage, backgroundMask, (double) spotSpacing);         // Fill in regions w/ spots.
@@ -175,10 +181,44 @@ public class smFRETSpotFinder implements Command {
     /**
      * Load an existing mapping file to initialize smFRETChannelMapper.
      */
-    private smFRETChannelMapper smfcm = new smFRETChannelMapper();  // smFREChannelMapper object.
-    public void loadMappingJSON(File mappingFileName){
+    public void loadMappingJSON(String mappingFileName){
         this.smfcm.loadMappingJSON(mappingFileName);
         this.smfcm.log = log;
+    }
+
+    /**
+     * Load overlay and background masks.
+     */
+    public void loadMasks(String masksFileName){
+        ImagePlus masksImage = new ImagePlus(masksFileName);
+
+        // Overlay mask.
+        ImageProcessor ip = masksImage.getStack().getProcessor(1);
+        this.overlapMask = new ImagePlus("overlap mask", ip);
+
+        // Background mask.
+        ip = masksImage.getStack().getProcessor(2);
+        this.backgroundMask = new ImagePlus("background mask", ip);
+    }
+
+    /**
+     * Load spot locations as a Polygon.
+     */
+    public Polygon loadSpotLocations(String spotsFileName){
+        Polygon spots = new Polygon();
+        try {
+            ResultsTable rt = ResultsTable.open2(spotsFileName);
+
+            for (int i = 0; i < rt.getCounter(); i++) {
+                int x = (int)rt.getValue("x", i);
+                int y = (int)rt.getValue("y", i);
+                spots.addPoint(x,y);
+            }
+        } catch (Exception e) {
+            log.info(e);
+            IJ.handleException(e);
+        }
+        return spots;
     }
 
     /**
@@ -262,7 +302,7 @@ public class smFRETSpotFinder implements Command {
      */
     private ImagePlus neighborhoodMaskToProximityMask(ImagePlus neighborhoodMask) {
         ImagePlus proximityMask = neighborhoodMask.duplicate();
-        proximityMask.setTitle("overap_mask");
+        proximityMask.setTitle("overlap_mask");
         ImageProcessor imp = proximityMask.getProcessor();
 
         for (int i = 0; i < proximityMask.getWidth(); i++){
@@ -276,6 +316,27 @@ public class smFRETSpotFinder implements Command {
             }
         }
         return proximityMask;
+    }
+
+    /**
+     * Save spot locations as a table.
+     */
+    private void saveSpotLocations(String spotsFileName, Polygon spots){
+        try {
+            ResultsTable rt = new ResultsTable();
+
+            for (int i = 0; i < spots.npoints; i++) {
+                int x = spots.xpoints[i];
+                int y = spots.ypoints[i];
+                rt.incrementCounter();
+                rt.addValue("x", x);
+                rt.addValue("y", y);
+            }
+            rt.saveAs(spotsFileName);
+        } catch (Exception e) {
+            log.info(e);
+            IJ.handleException(e);
+        }
     }
 
     /**
@@ -358,11 +419,22 @@ public class smFRETSpotFinder implements Command {
     @Override
     public void run() {
         try {
-	        log.info("starting spot finding");
-            loadMappingJSON(mappingFile);
+	        log.info("starting spot finding on image " + inputImageName);
 
-            FileInfo inputImageFileInfo = inputImage.getFileInfo();
-            log.info(inputImageFileInfo.directory + " " + inputImageFileInfo.fileName);
+            // Root name to use for saving output, this is just the file name
+            // without the extension.
+            String saveRootName = inputImageName.toString();
+            int dotIndex = saveRootName.lastIndexOf('.');
+            if (dotIndex > 0) {
+                saveRootName = saveRootName.substring(0, dotIndex);
+            }
+            log.info("save root " + saveRootName);
+
+            // Load the image to process.
+            ImagePlus inputImage = new ImagePlus(inputImageName.toString());
+
+            // Load the channel to channel mapping file.
+            loadMappingJSON(mappingFile.toString());
 
             // Average image.
             log.info("average image - " + inputImage.getNSlices() + " slices");
@@ -373,7 +445,7 @@ public class smFRETSpotFinder implements Command {
             java.util.List<ImagePlus> images = this.smfcm.splitImagePlus(averageImage, true);
 
             ImagePlus sumImage = ImageCalculator.run(images.get(0), images.get(1), "add create");
-            sumImage.setTitle("channels_sum_image");
+            sumImage.setTitle("spot_qc_image");
 
             // find all spots in tne sum image.
             ImageProcessor sumImageProc = sumImage.getProcessor();
@@ -392,7 +464,7 @@ public class smFRETSpotFinder implements Command {
 
             // filter low SNR spots.
             this.backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
-            backgroundMask = neighborhoodMaskToBackgroundMask(this.backgroundMask);
+            this.backgroundMask = neighborhoodMaskToBackgroundMask(this.backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
 
@@ -405,11 +477,37 @@ public class smFRETSpotFinder implements Command {
                 ui.show(backgroundImage);
             }
 
-            FileSaver sourceFile = new FileSaver(sumImage);
-            sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "sum_image.tif");
+            // save analysis results.
+            String masksFileName = saveRootName + "_masks.tif";
+            String spotsFileName = saveRootName +  "_spots.csv";
 
-            sourceFile = new FileSaver(backgroundImage);
-            sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "background_image.tif");
+            // JSON file w/ analysis parameters, etc.
+            Map<String, Object> mapping = new HashMap<>();
+            mapping.put("root name", saveRootName);
+            mapping.put("image name", inputImageName);
+            mapping.put("mapping file", mappingFile);
+            mapping.put("masks file", masksFileName);
+            mapping.put("spots file", spotsFileName);
+            mapping.put("spot sigma", spotSigma);
+            mapping.put("camera black", cameraBlackLevel);
+            mapping.put("camera gain", cameraGain);
+
+            ObjectMapper mapper = new ObjectMapper();
+            File saveFile = new File(saveRootName + "_spot_finding.json");
+            mapper.writeValue(saveFile, mapping);
+
+            // Table w/ spot locations.
+            saveSpotLocations(spotsFileName, filteredSpots);
+
+            // QC image w/ identified spots.
+            FileSaver sourceFile = new FileSaver(sumImage);
+            sourceFile.saveAsTiff(saveRootName + "_spot_qc_image.tif");
+
+            // Masks that will be needed for extracting time traces.
+            Concatenator cctr = new Concatenator();
+            ImagePlus maskImages = cctr.concatenate(this.overlapMask, this.backgroundMask, false);
+            sourceFile = new FileSaver(maskImages);
+            sourceFile.saveAsTiff(masksFileName);
 
 	        log.info("finishing spot finding");
         } catch (Exception e) {

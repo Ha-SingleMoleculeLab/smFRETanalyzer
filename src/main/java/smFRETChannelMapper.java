@@ -30,18 +30,14 @@ import org.scijava.ui.UIService;
         menuPath = "Plugins>smFRET>smFRET Channel Mapping")
 public class smFRETChannelMapper implements Command {
 
-    // Parameters.
-    //@Parameter
-    //OpService ops;
-
     @Parameter
     LogService log;
 
     @Parameter
     UIService ui;
 
-    //@Parameter
-    //ImagePlus inputImage;
+    @Parameter(description = "image to analyze to identify the mapping", label = "Image", style = "open")
+    File inputImageName;
 
     @Parameter (description = "first slice for averaging", label = "Start Slice", min = "1")
     Integer startSlice = 1;
@@ -49,12 +45,12 @@ public class smFRETChannelMapper implements Command {
     @Parameter (description = "last slice for averaging", label = "End Slice", min = "1")
     Integer endSlice = 30;
 
-    @Parameter(description = "image to analyze to identify the mapping", label = "Image", style = "open")
-    File inputImageName;
-
     // Member variables.
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private final String workingImagePathAndFileName = IJ.getDirectory("temp") + "-" + UUID.randomUUID() + "-scratch.tif";
+    private String transformString = null;      // Transform string to pass to TurboReg.
+    private int mapImageWidth = 0;              // Expected image width for the transform.
+    private int mapImageHeight = 0;             // Expected image height for the transform.
 
     /**
      * Average an ImagePlus image stack.
@@ -81,13 +77,11 @@ public class smFRETChannelMapper implements Command {
     /**
      * Load an existing mapping file to initialize transformString and image size.
      */
-    private String transformString = null;      // Transform string to pass to TurboReg.
-    private int mapImageWidth = 0;              // Expected image width for the transform.
-    private int mapImageHeight = 0;             // Expected image height for the transform.
-    public void loadMappingJSON(File mappingFileName) {
+    public void loadMappingJSON(String mappingFileName) {
         try {
             ObjectMapper mapper = new ObjectMapper();
-            Map<String, Object> mapping = mapper.readValue(mappingFileName, HashMap.class);
+            File mappingFile = new File(mappingFileName);
+            Map<String, Object> mapping = mapper.readValue(mappingFile, HashMap.class);
             ArrayList<ArrayList <Double>> sourcePoints = (ArrayList) mapping.get("source points");
             ArrayList<ArrayList <Double>> targetPoints = (ArrayList) mapping.get("target points");
 
@@ -208,9 +202,10 @@ public class smFRETChannelMapper implements Command {
             }
             log.info("save root " + saveRootName);
 
-            // Load image to process.
-            Opener sourceOpener = new Opener();
-            ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
+            // Load the image to process.
+            //Opener sourceOpener = new Opener();
+            //ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
+            ImagePlus inputImage = new ImagePlus(inputImageName.toString());
 
             log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
 
@@ -301,7 +296,7 @@ public class smFRETChannelMapper implements Command {
             //
             // reload mapping to initialize transform string.
             //
-            loadMappingJSON(saveFile);
+            loadMappingJSON(saveFile.toString());
 
             // Warp target image to source, convert Gray8 and overlay for user QC.
             log.info("calculating QC image");
@@ -332,10 +327,6 @@ public class smFRETChannelMapper implements Command {
             sourceFileSaver.saveAsTiff(pathAndFileName);
 
             log.info("finishing channel mapping");
-
-            // Method debug code.
-            loadMappingJSON(saveFile);
-            log.info(this.transformString);
 
         } catch (Exception e) {
             log.info(e);

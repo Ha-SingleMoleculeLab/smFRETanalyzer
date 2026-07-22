@@ -12,7 +12,9 @@ import java.util.*;
 
 import ij.IJ;
 import ij.ImagePlus;
+import ij.io.FileOpener;
 import ij.io.FileSaver;
+import ij.io.Opener;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.ZProjector;
 import ij.process.ImageConverter;
@@ -38,17 +40,17 @@ public class smFRETChannelMapper implements Command {
     @Parameter
     UIService ui;
 
-    @Parameter
-    ImagePlus inputImage;
+    //@Parameter
+    //ImagePlus inputImage;
 
-    @Parameter (description = "first slice for averaging", min = "1")
+    @Parameter (description = "first slice for averaging", label = "Start Slice", min = "1")
     Integer startSlice = 1;
 
-    @Parameter (description = "last slice for averaging", min = "1")
+    @Parameter (description = "last slice for averaging", label = "End Slice", min = "1")
     Integer endSlice = 30;
 
-    @Parameter(description = "directory to save results in", label = "save directory", style = "directory")
-    File saveDirectory;
+    @Parameter(description = "image to analyze to identify the mapping", label = "Image", style = "open")
+    File inputImageName;
 
     // Member variables.
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
@@ -195,8 +197,23 @@ public class smFRETChannelMapper implements Command {
     @Override
     public void run() {
         try {
-	        log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
-	    
+	        log.info("starting channel mapping from image " + inputImageName);
+
+            // Root name to use for saving output, this is just the file name
+            // without the extension.
+            String saveRootName = inputImageName.toString();
+            int dotIndex = saveRootName.lastIndexOf('.');
+            if (dotIndex > 0) {
+                saveRootName = saveRootName.substring(0, dotIndex);
+            }
+            log.info("save root " + saveRootName);
+
+            // Load image to process.
+            Opener sourceOpener = new Opener();
+            ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
+
+            log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
+
             // Calculate average image.
             //
             // FIXME: Block or possibly handle RGB images.
@@ -223,13 +240,6 @@ public class smFRETChannelMapper implements Command {
             averageImageSource.setTitle("average_image_source");
             String averageImageSourceFilename = saveTempImageFile(averageImageSource);
             log.info("source image " + averageImageSourceFilename);
-
-            /*
-            if (!this.isHeadless) {
-                ui.show(averageImageTarget);
-                ui.show(averageImageSource);
-            }
-            */
 
             // Find correspondence using TurboReg.
             //
@@ -272,7 +282,7 @@ public class smFRETChannelMapper implements Command {
             model.fit(sourcePointsT, targetPointsT, w);
             log.info(model);
              */
-            log.info("saving results to " + saveDirectory);
+            log.info("saving results");
 
             // Save mapping and expected image size as JSON.
             Map<String, Object> mapping = new HashMap<>();
@@ -282,7 +292,7 @@ public class smFRETChannelMapper implements Command {
             mapping.put("image height", averageImage.getHeight());
 
             ObjectMapper mapper = new ObjectMapper();
-            File saveFile = new File(saveDirectory, "mapping.json");
+            File saveFile = new File(saveRootName + "_mapping.json");
             mapper.writeValue(saveFile, mapping);
 
             // We could have just loaded the transformed image from the current turboRegObject,
@@ -297,9 +307,6 @@ public class smFRETChannelMapper implements Command {
             log.info("calculating QC image");
             ImagePlus transformedSource = transformImagePlus(averageImageSource);
 
-//            method = turboRegObject.getClass().getMethod("getTransformedImage", null);
-//            ImagePlus transformedSource = (ImagePlus)method.invoke(turboRegObject, null);
-
             ImageConverter icSource = new ImageConverter(transformedSource);
             icSource.convertToGray8();
 
@@ -313,14 +320,16 @@ public class smFRETChannelMapper implements Command {
 
             ImagePlus rgbImageQCImage = RGBStackMerge.mergeChannels(channels, false);
             if (!this.isHeadless) {
+                ui.show(inputImage);
                 ui.show(rgbImageQCImage);
             }
+            rgbImageQCImage.setTitle("mapping QC image");
 
             // Save QC image.
-            FileSaver sourceFile = new FileSaver(rgbImageQCImage);
-            String pathAndFileName = saveDirectory.getAbsolutePath() + File.separator + "mapping_qc_image.tif";
+            FileSaver sourceFileSaver = new FileSaver(rgbImageQCImage);
+            String pathAndFileName = saveRootName + "_mapping_qc_image.tif";
             log.info(pathAndFileName);
-            sourceFile.saveAsTiff(pathAndFileName);
+            sourceFileSaver.saveAsTiff(pathAndFileName);
 
             log.info("finishing channel mapping");
 

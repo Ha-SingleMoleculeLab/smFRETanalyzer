@@ -6,6 +6,7 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.gui.Overlay;
 import ij.gui.Roi;
+import ij.io.FileInfo;
 import ij.io.FileSaver;
 import ij.plugin.ImageCalculator;
 import ij.plugin.filter.MaximumFinder;
@@ -65,6 +66,22 @@ public class smFRETSpotFinder implements Command {
 
     // Member variables.
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
+
+    /**
+     * Estimate background of an image.
+     *
+     * The idea is that we assume that the foreground is the area around the identified spots. This
+     * is masked out, and then we fill in the missing values using a simple inpainting procedure, repeated
+     * convolution of the image with a Gaussian.
+     */
+    private ImagePlus backgroundMask;
+    private ImagePlus overlapMask;
+    public ImagePlus backgroundEstimate(ImagePlus image) {
+        ImagePlus backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
+        backgroundImage = maskInpaint(backgroundImage, backgroundMask, (double) spotSpacing);         // Fill in regions w/ spots.
+        backgroundImage.setTitle("background_image");
+        return backgroundImage;
+    }
 
     /**
      * Creates the mask that is used to identify spots that are not in the overlap
@@ -172,13 +189,15 @@ public class smFRETSpotFinder implements Command {
         ImagePlus lastFilledImage = image.duplicate();
 
         ImageProcessor imp = filledImage.getProcessor();
-        for (int i = 0; i < 400; i++){
+        for (int i = 0; i < 100; i++){
             imp.blurGaussian(sigma);
             if (maskInpaintDifference(filledImage, lastFilledImage, mask) < 1){
+                maskInpaintReset(image, filledImage, mask);
+                log.info("converged after " +  i);
                 break;
             }
             maskInpaintReset(image, filledImage, mask);
-            lastFilledImage = image.duplicate();
+            lastFilledImage = filledImage.duplicate();
         }
         return filledImage;
     }
@@ -198,6 +217,7 @@ public class smFRETSpotFinder implements Command {
                 }
             }
         }
+        //log.info("difference is " +  diff);
         return diff;
     }
 
@@ -217,39 +237,117 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Returns the minimum value in the region where overlayMask is above threshold.
+     * converts neighborhood mask for use as a background mask.
      */
-    /*
-    private int overlayMinValue(ImagePlus image, ImagePlus mask) {
-        int ovMin = 65000;
-        for (int i = 0; i < image.getWidth(); i++) {
-            for (int j = 0; j < image.getWidth(); j++) {
-                if (mask.getPixel(i,j)[0] > smFRETSpotFinder.overlapThreshold){
-                    int pixValue = image.getPixel(i,j)[0];
-                    if (pixValue < ovMin) {
-                        ovMin = pixValue;
-                    }
+    private ImagePlus neighborhoodMaskToBackgroundMask(ImagePlus neighborhoodMask) {
+        ImagePlus backgroundMask = neighborhoodMask.duplicate();
+        backgroundMask.setTitle("foreground_mask");
+        ImageProcessor imp = backgroundMask.getProcessor();
+
+        for (int i = 0; i < backgroundMask.getWidth(); i++){
+            for (int j = 0; j < backgroundMask.getHeight(); j++) {
+                if (backgroundMask.getPixel(i,j)[0] > 0){
+                    imp.putPixel(i,j,0);
+                }
+                else{
+                    imp.putPixel(i,j,1);
                 }
             }
         }
-        return ovMin;
+        return backgroundMask;
     }
-     */
 
     /**
-     *
+     * converts neighborhood mask for use to detect spots that are too close to each other.
      */
-    private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask, int threshold, int sign){
+    private ImagePlus neighborhoodMaskToProximityMask(ImagePlus neighborhoodMask) {
+        ImagePlus proximityMask = neighborhoodMask.duplicate();
+        proximityMask.setTitle("overap_mask");
+        ImageProcessor imp = proximityMask.getProcessor();
+
+        for (int i = 0; i < proximityMask.getWidth(); i++){
+            for (int j = 0; j < proximityMask.getHeight(); j++) {
+                if (proximityMask.getPixel(i,j)[0] > 1){
+                    imp.putPixel(i,j,0);
+                }
+                else{
+                    imp.putPixel(i,j,1);
+                }
+            }
+        }
+        return proximityMask;
+    }
+
+    /**
+     * Remove spots where mask is 0.
+     */
+    private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask){
         Polygon filteredSpots = new Polygon();
 
         for (int i = 0; i < spots.npoints; i++) {
             int x = spots.xpoints[i];
             int y = spots.ypoints[i];
 
-            if (mask.getPixel(x,y)[0]*sign > threshold*sign){
+            if (mask.getPixel(x,y)[0] > 0){
                 filteredSpots.addPoint(x,y);
             }
         }
+
+        return filteredSpots;
+    }
+
+    /**
+     * Remove spots with estimated SNR less than threshold.
+     *
+     * The factor of two for the camera black level is because we added the two channels together.
+     */
+    private Polygon spotFilterSNR(Polygon spots, ImagePlus sumImage, ImagePlus backgroundImage){
+        Polygon filteredSpots = new Polygon();
+
+        ImagePlus fgSmooth = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
+        ImageProcessor imp = fgSmooth.getProcessor();
+        imp.blurGaussian(spotSigma);
+        fgSmooth.setTitle("foreground_smooth");
+
+        ImagePlus bgSmooth = backgroundImage.duplicate();
+        imp = fgSmooth.getProcessor();
+        imp.blurGaussian(spotSigma);
+        bgSmooth.setTitle("background_smooth");
+
+        ui.show(sumImage);
+        ui.show(backgroundImage);
+
+        // In order to calculate the SNR integrated over the spot we need the integrated magnitude
+        // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when
+        // for our purposes a unit height Gaussian would have been the correct thing to use.
+        double norm = 2.0*Math.PI*spotSigma*spotSigma;
+        for (int i = 0; i < spots.npoints; i++) {
+            int x = spots.xpoints[i];
+            int y = spots.ypoints[i];
+
+            double fg = norm*cameraGain*(fgSmooth.getPixel(x,y)[0]);
+            double bg = norm*cameraGain*(bgSmooth.getPixel(x,y)[0] - 2*cameraBlackLevel);
+
+            if (bg > 1){
+                bg = Math.sqrt(bg);
+            }
+            else{
+                bg = 1.0;
+            }
+            double snr = fg/bg;
+            log.info(x + " " + y + " " + fg + " " + " " + bg + " " + snr);
+            if (snr > spotThreshold) {
+                filteredSpots.addPoint(x,y);
+            }
+        }
+
+        /*
+        FileSaver sourceFile = new FileSaver(fgSmooth);
+        sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "fg_smooth.tif");
+
+        sourceFile = new FileSaver(bgSmooth);
+        sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "bg_smooth.tif");
+        */
 
         return filteredSpots;
     }
@@ -263,6 +361,9 @@ public class smFRETSpotFinder implements Command {
 	        log.info("starting spot finding");
             loadMappingJSON(mappingFile);
 
+            FileInfo inputImageFileInfo = inputImage.getFileInfo();
+            log.info(inputImageFileInfo.directory + " " + inputImageFileInfo.fileName);
+
             // Average image.
             log.info("average image - " + inputImage.getNSlices() + " slices");
             ImagePlus averageImage = this.smfcm.averageImagePlus(inputImage, startSlice, endSlice);
@@ -275,37 +376,40 @@ public class smFRETSpotFinder implements Command {
             sumImage.setTitle("channels_sum_image");
 
             // find all spots in tne sum image.
-            ImageProcessor sumImageIp = sumImage.getProcessor();
+            ImageProcessor sumImageProc = sumImage.getProcessor();
             MaximumFinder mf = new MaximumFinder();
-            Polygon allSpots = mf.getMaxima(sumImageIp, 5, true);
+            Polygon allSpots = mf.getMaxima(sumImageProc, 5, true);
 
             // filter spots that are near the edges of either channel.
-            ImagePlus overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
-            Polygon filteredSpots = spotFilterWithMask(allSpots, overlapMask, 0, 1);
+            // overlapMask because this is where the channels overlap.
+            this.overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
+            Polygon filteredSpots = spotFilterWithMask(allSpots, this.overlapMask);
 
             // filter spots that are too close to each other.
-            ImagePlus neighborhoodMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
-            filteredSpots = spotFilterWithMask(filteredSpots, neighborhoodMask, 2, -1);
+            ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
+            proximityMask = neighborhoodMaskToProximityMask(proximityMask);
+            filteredSpots = spotFilterWithMask(filteredSpots, proximityMask);
 
             // filter low SNR spots.
-            ImagePlus foregroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
+            this.backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
+            backgroundMask = neighborhoodMaskToBackgroundMask(this.backgroundMask);
+            ImagePlus backgroundImage = backgroundEstimate(sumImage);
+            filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
 
             // display as overlay on sum image.
-            sumImage = maskInpaint(sumImage, overlapMask, 2.0);
-
-            Overlay ov = getSpotOverlay(filteredSpots, 5, Color.GREEN);
+            Overlay ov = getSpotOverlay(filteredSpots, spotSpacing, Color.GREEN);
             sumImage.setOverlay(ov);
 
             if (!this.isHeadless) {
-                ui.show(overlapMask);
                 ui.show(sumImage);
+                ui.show(backgroundImage);
             }
 
             FileSaver sourceFile = new FileSaver(sumImage);
             sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "sum_image.tif");
 
-            sourceFile = new FileSaver(foregroundMask);
-            sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "mask_image.tif");
+            sourceFile = new FileSaver(backgroundImage);
+            sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "background_image.tif");
 
 	        log.info("finishing spot finding");
         } catch (Exception e) {

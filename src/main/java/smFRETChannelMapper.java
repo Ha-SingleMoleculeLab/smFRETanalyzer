@@ -19,6 +19,7 @@ import ij.plugin.RGBStackMerge;
 import ij.plugin.ZProjector;
 import ij.process.ImageConverter;
 
+import ij.process.ImageProcessor;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Parameter;
@@ -181,10 +182,9 @@ public class smFRETChannelMapper implements Command {
             transformedImage = (ImagePlus) method.invoke(turboRegObject, null);
 
             // convert to 16 bit.
-            ImageConverter ic = new ImageConverter(transformedImage);
-            ic.setDoScaling(false);
-            ic.convertToGray16();
-            transformedImage.updateAndDraw();
+            ImageProcessor imp = transformedImage.getProcessor();
+            transformedImage = new ImagePlus("transformed image", imp.convertToShort(false));
+
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

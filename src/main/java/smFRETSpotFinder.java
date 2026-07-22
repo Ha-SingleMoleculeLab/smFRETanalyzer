@@ -42,7 +42,7 @@ public class smFRETSpotFinder implements Command {
     @Parameter(description = "image stack to analyze", label = "Image", style = "open")
     File inputImageName;
 
-    @Parameter(description = "channel to channel mapping file", label = "mapping file", style = "open")
+    @Parameter(description = "channel to channel mapping JSON file", label = "Mapping JSON file", style = "open")
     File mappingFile;
 
     @Parameter (description = "first slice for averaging", min = "1")
@@ -340,6 +340,13 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
+     * Thin wrapper around smfcm function.
+     */
+    public java.util.List<ImagePlus> splitImagePlus(ImagePlus image){
+        return smfcm.splitImagePlus(image, true);
+    }
+
+    /**
      * Remove spots where mask is 0.
      */
     private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask){
@@ -375,9 +382,6 @@ public class smFRETSpotFinder implements Command {
         imp.blurGaussian(spotSigma);
         bgSmooth.setTitle("background_smooth");
 
-        ui.show(sumImage);
-        ui.show(backgroundImage);
-
         // In order to calculate the SNR integrated over the spot we need the integrated magnitude
         // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when
         // for our purposes a unit height Gaussian would have been the correct thing to use.
@@ -388,6 +392,7 @@ public class smFRETSpotFinder implements Command {
 
             double fg = norm*cameraGain*(fgSmooth.getPixel(x,y)[0]);
             double bg = norm*cameraGain*(bgSmooth.getPixel(x,y)[0] - 2*cameraBlackLevel);
+
 
             if (bg > 1){
                 bg = Math.sqrt(bg);
@@ -474,7 +479,6 @@ public class smFRETSpotFinder implements Command {
 
             if (!this.isHeadless) {
                 ui.show(sumImage);
-                ui.show(backgroundImage);
             }
 
             // save analysis results.

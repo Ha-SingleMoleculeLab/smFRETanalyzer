@@ -166,6 +166,7 @@ public class smFRETChannelMapper implements Command {
 
         ImagePlus transformedImage = null;
         try {
+            // save image in temporary file.
             FileSaver sourceFile = new FileSaver(image);
             sourceFile.saveAsTiff(this.workingImagePathAndFileName);
 
@@ -178,6 +179,12 @@ public class smFRETChannelMapper implements Command {
             Object turboRegObject = IJ.runPlugIn("TurboReg_", options);
             Method method = turboRegObject.getClass().getMethod("getTransformedImage", null);
             transformedImage = (ImagePlus) method.invoke(turboRegObject, null);
+
+            // convert to 16 bit.
+            ImageConverter ic = new ImageConverter(transformedImage);
+            ic.setDoScaling(false);
+            ic.convertToGray16();
+            transformedImage.updateAndDraw();
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

@@ -54,7 +54,7 @@ public class smFRETAnalyzer implements Command {
     private final boolean diagnostic_mode = true;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private String saveRootName;
-    private smFRETSpotFinder smfsf = new smFRETSpotFinder();
+    private final smFRETSpotFinder smfsf = new smFRETSpotFinder();
 
     /**
      * Stack background estimation.
@@ -73,6 +73,8 @@ public class smFRETAnalyzer implements Command {
         ImageStack sourceBg = new ImageStack();
 
         IJ.showStatus("Background estimation..");
+        ImagePlus targetImgEst = null;
+        ImagePlus sourceImgEst = null;
         for (int i = 1; i <= imageZFlt.size(); i++){
             //IJ.showProgress(i, imageZFlt.size());
             IJ.showProgress((double)i/((double)imageZFlt.size()));
@@ -87,23 +89,27 @@ public class smFRETAnalyzer implements Command {
             ImagePlus sourceImg = splitImages.get(1);
 
             // Estimate background in source and target.
-            ImagePlus targetImgEst = smfsf.backgroundEstimate(targetImg);
-            ImagePlus sourceImgEst = smfsf.backgroundEstimate(sourceImg);
+            targetImgEst = smfsf.backgroundEstimate(targetImg, targetImgEst);
+            sourceImgEst = smfsf.backgroundEstimate(sourceImg, sourceImgEst);
 
             // Add to stack.
             targetBg.addSlice(targetImgEst.getProcessor());
             sourceBg.addSlice(sourceImgEst.getProcessor());
+
+            if(diagnostic_mode){
+                log.info("");
+            }
         }
 
         ImagePlus targetBgImp = new ImagePlus("target background estimate", targetBg);
         ImagePlus sourceBgImp = new ImagePlus("source background estimate", sourceBg);
 
-        if (this.diagnostic_mode) {
+        if (diagnostic_mode) {
             FileSaver fgSmoothImageSaver = new FileSaver(targetBgImp);
-            fgSmoothImageSaver.saveAsTiff(this.saveRootName + "_fret_target_bg.tif");
+            fgSmoothImageSaver.saveAsTiff(saveRootName + "_fret_target_bg.tif");
 
             FileSaver bgSmoothImageSaver = new FileSaver(sourceBgImp);
-            bgSmoothImageSaver.saveAsTiff(this.saveRootName + "_fret_source_bg.tif");
+            bgSmoothImageSaver.saveAsTiff(saveRootName + "_fret_source_bg.tif");
         }
 
         java.util.List<ImagePlus> images = new ArrayList<>();
@@ -159,7 +165,7 @@ public class smFRETAnalyzer implements Command {
             // Save time traces.
 
             /*
-            if (!this.isHeadless) {
+            if (!isHeadless) {
                 ui.show(smfsf.overlapMask);
                 ui.show(smfsf.backgroundMask);
             }

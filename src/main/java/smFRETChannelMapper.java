@@ -86,9 +86,9 @@ public class smFRETChannelMapper implements Command {
             ArrayList<ArrayList <Double>> sourcePoints = (ArrayList) mapping.get("source points");
             ArrayList<ArrayList <Double>> targetPoints = (ArrayList) mapping.get("target points");
 
-            this.mapImageWidth = (int) mapping.get("image width");
-            this.mapImageHeight = (int) mapping.get("image height");
-            this.transformString = sourcePoints.get(0).get(0) + " " + sourcePoints.get(0).get(1)
+            mapImageWidth = (int) mapping.get("image width");
+            mapImageHeight = (int) mapping.get("image height");
+            transformString = sourcePoints.get(0).get(0) + " " + sourcePoints.get(0).get(1)
                                 + " " + targetPoints.get(0).get(0) + " " + targetPoints.get(0).get(1)
                                 + " " + sourcePoints.get(1).get(0) + " " + sourcePoints.get(1).get(1)
                                 + " " + targetPoints.get(1).get(0) + " " + targetPoints.get(1).get(1)
@@ -110,16 +110,16 @@ public class smFRETChannelMapper implements Command {
     public java.util.List<ImagePlus> splitImagePlus(ImagePlus image, boolean transform){
 
         // Record or check that the image size is correct for the current mapping.
-        if (this.mapImageWidth == 0) {
-            this.mapImageWidth = image.getWidth();
-            this.mapImageHeight = image.getHeight();
+        if (mapImageWidth == 0) {
+            mapImageWidth = image.getWidth();
+            mapImageHeight = image.getHeight();
         }
         else{
-            if (this.mapImageWidth != image.getWidth()){
-                throw new smFRETAnalysisException("Image width (" + image.getWidth() + ") doesn't match expected width for current mapping (" + this.mapImageWidth + ")");
+            if (mapImageWidth != image.getWidth()){
+                throw new smFRETAnalysisException("Image width (" + image.getWidth() + ") doesn't match expected width for current mapping (" + mapImageWidth + ")");
             }
-            if (this.mapImageHeight != image.getHeight()){
-                throw new smFRETAnalysisException("Image height (" + image.getHeight() + ") doesn't match expected height for current mapping (" + this.mapImageHeight + ")");
+            if (mapImageHeight != image.getHeight()){
+                throw new smFRETAnalysisException("Image height (" + image.getHeight() + ") doesn't match expected height for current mapping (" + mapImageHeight + ")");
             }
         }
 
@@ -161,7 +161,7 @@ public class smFRETChannelMapper implements Command {
      * Transform an ImagePlus image with the current transform.
      */
     private ImagePlus transformImagePlus(ImagePlus image){
-        if (this.transformString == null) {
+        if (transformString == null) {
             throw new smFRETAnalysisException("Error: Cannot transform image, transform string not set");
         }
 
@@ -169,12 +169,12 @@ public class smFRETChannelMapper implements Command {
         try {
             // save image in temporary file.
             FileSaver sourceFile = new FileSaver(image);
-            sourceFile.saveAsTiff(this.workingImagePathAndFileName);
+            sourceFile.saveAsTiff(workingImagePathAndFileName);
 
             String options = " -transform"
-                    + " -file " + this.workingImagePathAndFileName
+                    + " -file " + workingImagePathAndFileName
                     + " " + image.getWidth() + " " + image.getHeight()
-                    + " -affine " + this.transformString
+                    + " -affine " + transformString
                     + " -hideOutput";
 
             Object turboRegObject = IJ.runPlugIn("TurboReg_", options);
@@ -224,7 +224,7 @@ public class smFRETChannelMapper implements Command {
             ImagePlus averageImage = averageImagePlus(inputImage, startSlice, endSlice);
 
             FileSaver averageImageFileSaver = new FileSaver(averageImage);
-            if (this.diagnostic_mode){
+            if (diagnostic_mode){
                 averageImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_image.tif");
             }
 
@@ -243,7 +243,7 @@ public class smFRETChannelMapper implements Command {
             log.info("target image " + averageImageTargetFilename);
 
             FileSaver targetImageFileSaver = new FileSaver(averageImageTarget);
-            if (this.diagnostic_mode){
+            if (diagnostic_mode){
                 targetImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_target.tif");
             }
 
@@ -254,7 +254,7 @@ public class smFRETChannelMapper implements Command {
             log.info("source image " + averageImageSourceFilename);
 
             FileSaver sourceImageFileSaver = new FileSaver(averageImageSource);
-            if (this.diagnostic_mode){
+            if (diagnostic_mode){
                 sourceImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_source.tif");
             }
 
@@ -336,8 +336,8 @@ public class smFRETChannelMapper implements Command {
             channels[2] = transformedSource; // Blue
 
             ImagePlus rgbImageQCImage = RGBStackMerge.mergeChannels(channels, false);
-            if (!this.isHeadless) {
-                ui.show(inputImage);
+            if (!isHeadless) {
+                ui.show(averageImage);
                 ui.show(rgbImageQCImage);
             }
             rgbImageQCImage.setTitle("mapping QC image");

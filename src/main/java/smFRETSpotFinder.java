@@ -75,7 +75,7 @@ public class smFRETSpotFinder implements Command {
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus overlapMask;
     private String saveRootName;
-    private smFRETChannelMapper smfcm = new smFRETChannelMapper();  // smFREChannelMapper object.
+    private final smFRETChannelMapper smfcm = new smFRETChannelMapper();  // smFREChannelMapper object.
 
     /**
      * Estimate background of an image.
@@ -85,10 +85,34 @@ public class smFRETSpotFinder implements Command {
      * convolution of the image with a Gaussian.
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
-        ImagePlus backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
+        ImagePlus backgroundImage;
+        log.info("start");
+        backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
         backgroundImage = maskInpaint(backgroundImage, backgroundMask, (double) spotSpacing);         // Fill in regions w/ spots.
+        log.info("stop");
         backgroundImage.setTitle("background_image");
         return backgroundImage;
+    }
+
+    /**
+     * This fills in the masked area of image with values from fillEstimate. This is an optimization
+     * As the fill generally doesn't change that much.
+     */
+    public ImagePlus backgroundEstimate(ImagePlus image, ImagePlus fillEstimate) {
+        ImageProcessor imp = image.getProcessor();
+
+        if (fillEstimate != null){
+            for (int i = 0; i < image.getWidth(); i++) {
+                for (int j = 0; j < image.getHeight(); j++) {
+                    if (overlapMask.getPixel(i, j)[0] == 0) {
+                        imp.putPixel(i, j, fillEstimate.getPixel(i, j)[0]);
+                    } else if (backgroundMask.getPixel(i, j)[0] == 0) {
+                        imp.putPixel(i, j, fillEstimate.getPixel(i, j)[0]);
+                    }
+                }
+            }
+        }
+        return backgroundEstimate(image);
     }
 
     /**
@@ -113,7 +137,7 @@ public class smFRETSpotFinder implements Command {
         overlapMask.updateAndDraw();
 
         // Transform and overlap allowed regions.
-        java.util.List<ImagePlus> overlapImages = this.smfcm.splitImagePlus(overlapMask, true);
+        java.util.List<ImagePlus> overlapImages = smfcm.splitImagePlus(overlapMask, true);
         ImagePlus overlapSumImage = ImageCalculator.run(overlapImages.get(0), overlapImages.get(1), "add create");
 
         // Threshold to binary.
@@ -184,8 +208,8 @@ public class smFRETSpotFinder implements Command {
      * Load an existing mapping file to initialize smFRETChannelMapper.
      */
     public void loadMappingJSON(String mappingFileName){
-        this.smfcm.loadMappingJSON(mappingFileName);
-        this.smfcm.log = log;
+        smfcm.loadMappingJSON(mappingFileName);
+        smfcm.log = log;
     }
 
     /**
@@ -196,11 +220,11 @@ public class smFRETSpotFinder implements Command {
 
         // Overlay mask.
         ImageProcessor ip = masksImage.getStack().getProcessor(1);
-        this.overlapMask = new ImagePlus("overlap mask", ip);
+        overlapMask = new ImagePlus("overlap mask", ip);
 
         // Background mask.
         ip = masksImage.getStack().getProcessor(2);
-        this.backgroundMask = new ImagePlus("background mask", ip);
+        backgroundMask = new ImagePlus("background mask", ip);
     }
 
     /**
@@ -229,13 +253,16 @@ public class smFRETSpotFinder implements Command {
     private ImagePlus maskInpaint(ImagePlus image, ImagePlus mask, double sigma){
         ImagePlus filledImage = image.duplicate();
         ImagePlus lastFilledImage = image.duplicate();
+        log.info("maskInpaint");
 
         ImageProcessor imp = filledImage.getProcessor();
-        for (int i = 0; i < 100; i++){
+        for (int i = 0; i < 200; i++){
             imp.blurGaussian(sigma);
             if (maskInpaintDifference(filledImage, lastFilledImage, mask) < 1){
                 maskInpaintReset(image, filledImage, mask);
-                log.info("converged after " +  i);
+                if (diagnostic_mode) {
+                    log.info("converged after " + i);
+                }
                 break;
             }
             maskInpaintReset(image, filledImage, mask);
@@ -403,18 +430,20 @@ public class smFRETSpotFinder implements Command {
                 bg = 1.0;
             }
             double snr = fg/bg;
-            log.info(x + " " + y + " " + fg + " " + " " + bg + " " + snr);
+            if (diagnostic_mode) {
+                log.info(x + " " + y + " " + fg + " " + " " + bg + " " + snr);
+            }
             if (snr > spotThreshold) {
                 filteredSpots.addPoint(x,y);
             }
         }
 
-        if (this.diagnostic_mode) {
+        if (diagnostic_mode) {
             FileSaver fgSmoothImageSaver = new FileSaver(fgSmooth);
-            fgSmoothImageSaver.saveAsTiff(this.saveRootName + "_spotf_fg_smooth.tif");
+            fgSmoothImageSaver.saveAsTiff(saveRootName + "_spotf_fg_smooth.tif");
 
             FileSaver bgSmoothImageSaver = new FileSaver(bgSmooth);
-            bgSmoothImageSaver.saveAsTiff(this.saveRootName + "_spotf_bg_smooth.tif");
+            bgSmoothImageSaver.saveAsTiff(saveRootName + "_spotf_bg_smooth.tif");
         }
 
         return filteredSpots;
@@ -430,12 +459,12 @@ public class smFRETSpotFinder implements Command {
 
             // Root name to use for saving output, this is just the file name
             // without the extension.
-            this.saveRootName = inputImageName.toString();
+            saveRootName = inputImageName.toString();
             int dotIndex = saveRootName.lastIndexOf('.');
             if (dotIndex > 0) {
                 saveRootName = saveRootName.substring(0, dotIndex);
             }
-            log.info("save root " + this.saveRootName);
+            log.info("save root " + saveRootName);
 
             // Load the image to process.
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
@@ -445,11 +474,11 @@ public class smFRETSpotFinder implements Command {
 
             // Average image.
             log.info("average image - " + inputImage.getNSlices() + " slices");
-            ImagePlus averageImage = this.smfcm.averageImagePlus(inputImage, startSlice, endSlice);
+            ImagePlus averageImage = smfcm.averageImagePlus(inputImage, startSlice, endSlice);
 
             // split, transform and add the two channels together.
             log.info("split and transform");
-            java.util.List<ImagePlus> images = this.smfcm.splitImagePlus(averageImage, true);
+            java.util.List<ImagePlus> images = smfcm.splitImagePlus(averageImage, true);
 
             ImagePlus sumImage = ImageCalculator.run(images.get(0), images.get(1), "add create");
             sumImage.setTitle("spot_qc_image");
@@ -461,8 +490,8 @@ public class smFRETSpotFinder implements Command {
 
             // filter spots that are near the edges of either channel.
             // overlapMask because this is where the channels overlap.
-            this.overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
-            Polygon filteredSpots = spotFilterWithMask(allSpots, this.overlapMask);
+            overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
+            Polygon filteredSpots = spotFilterWithMask(allSpots, overlapMask);
 
             // filter spots that are too close to each other.
             ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
@@ -470,8 +499,8 @@ public class smFRETSpotFinder implements Command {
             filteredSpots = spotFilterWithMask(filteredSpots, proximityMask);
 
             // filter low SNR spots.
-            this.backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
-            this.backgroundMask = neighborhoodMaskToBackgroundMask(this.backgroundMask);
+            backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
+            backgroundMask = neighborhoodMaskToBackgroundMask(backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
 
@@ -479,17 +508,17 @@ public class smFRETSpotFinder implements Command {
             Overlay ov = getSpotOverlay(filteredSpots, spotSpacing, Color.GREEN);
             sumImage.setOverlay(ov);
 
-            if (!this.isHeadless) {
+            if (!isHeadless) {
                 ui.show(sumImage);
             }
 
             // save analysis results.
-            String masksFileName = this.saveRootName + "_spotf_masks.tif";
-            String spotsFileName = this.saveRootName +  "_spotf_spots.csv";
+            String masksFileName = saveRootName + "_spotf_masks.tif";
+            String spotsFileName = saveRootName +  "_spotf_spots.csv";
 
             // JSON file w/ analysis parameters, etc.
             Map<String, Object> mapping = new HashMap<>();
-            mapping.put("root name", this.saveRootName);
+            mapping.put("root name", saveRootName);
             mapping.put("image name", inputImageName);
             mapping.put("mapping file", mappingFile);
             mapping.put("masks file", masksFileName);
@@ -499,7 +528,7 @@ public class smFRETSpotFinder implements Command {
             mapping.put("camera gain", cameraGain);
 
             ObjectMapper mapper = new ObjectMapper();
-            File saveFile = new File(this.saveRootName + "_spotf_finding.json");
+            File saveFile = new File(saveRootName + "_spotf_finding.json");
             mapper.writeValue(saveFile, mapping);
 
             // Table w/ spot locations.
@@ -507,11 +536,11 @@ public class smFRETSpotFinder implements Command {
 
             // QC image w/ identified spots.
             FileSaver qcImageSaver = new FileSaver(sumImage);
-            qcImageSaver.saveAsTiff(this.saveRootName + "_spotf_qc_image.tif");
+            qcImageSaver.saveAsTiff(saveRootName + "_spotf_qc_image.tif");
 
             // Masks that will be needed for extracting time traces.
             Concatenator cctr = new Concatenator();
-            ImagePlus maskImages = cctr.concatenate(this.overlapMask, this.backgroundMask, false);
+            ImagePlus maskImages = cctr.concatenate(overlapMask, backgroundMask, false);
             FileSaver masksImageSaver = new FileSaver(maskImages);
             masksImageSaver.saveAsTiff(masksFileName);
 

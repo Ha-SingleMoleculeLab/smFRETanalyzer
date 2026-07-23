@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
+import ij.io.FileSaver;
 import ij.plugin.Filters3D;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
@@ -50,7 +51,9 @@ public class smFRETAnalyzer implements Command {
     Integer backgroundAverageNFrames = 30;
 
     // Member variables.
+    private final boolean diagnostic_mode = true;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
+    private String saveRootName;
     private smFRETSpotFinder smfsf = new smFRETSpotFinder();
 
     /**
@@ -95,6 +98,14 @@ public class smFRETAnalyzer implements Command {
         ImagePlus targetBgImp = new ImagePlus("target background estimate", targetBg);
         ImagePlus sourceBgImp = new ImagePlus("source background estimate", sourceBg);
 
+        if (this.diagnostic_mode) {
+            FileSaver fgSmoothImageSaver = new FileSaver(targetBgImp);
+            fgSmoothImageSaver.saveAsTiff(this.saveRootName + "_fret_target_bg.tif");
+
+            FileSaver bgSmoothImageSaver = new FileSaver(sourceBgImp);
+            bgSmoothImageSaver.saveAsTiff(this.saveRootName + "_fret_source_bg.tif");
+        }
+
         java.util.List<ImagePlus> images = new ArrayList<>();
         images.add(targetBgImp);
         images.add(sourceBgImp);
@@ -114,7 +125,7 @@ public class smFRETAnalyzer implements Command {
             // Load spot JSON file w/ the analysis parameters.
             ObjectMapper mapper = new ObjectMapper();
             Map<String, Object> mapping = mapper.readValue(spotJSONFile, HashMap.class);
-            String saveRootName = (String) mapping.get("root name");
+            this.saveRootName = (String) mapping.get("root name");
             String inputImageName = (String) mapping.get("image name");
             String mappingFileName = (String) mapping.get("mapping file");
             String masksFileName = (String) mapping.get("masks file");

@@ -70,9 +70,11 @@ public class smFRETSpotFinder implements Command {
     Integer edgeMargin = 5;
 
     // Member variables.
-    private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus backgroundMask;
+    private final boolean diagnostic_mode = true;
+    private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus overlapMask;
+    private String saveRootName;
     private smFRETChannelMapper smfcm = new smFRETChannelMapper();  // smFREChannelMapper object.
 
     /**
@@ -407,13 +409,13 @@ public class smFRETSpotFinder implements Command {
             }
         }
 
-        /*
-        FileSaver sourceFile = new FileSaver(fgSmooth);
-        sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "fg_smooth.tif");
+        if (this.diagnostic_mode) {
+            FileSaver fgSmoothImageSaver = new FileSaver(fgSmooth);
+            fgSmoothImageSaver.saveAsTiff(this.saveRootName + "_spotf_fg_smooth.tif");
 
-        sourceFile = new FileSaver(bgSmooth);
-        sourceFile.saveAsTiff(saveDirectory.getAbsolutePath() + File.separator + "bg_smooth.tif");
-        */
+            FileSaver bgSmoothImageSaver = new FileSaver(bgSmooth);
+            bgSmoothImageSaver.saveAsTiff(this.saveRootName + "_spotf_bg_smooth.tif");
+        }
 
         return filteredSpots;
     }
@@ -428,12 +430,12 @@ public class smFRETSpotFinder implements Command {
 
             // Root name to use for saving output, this is just the file name
             // without the extension.
-            String saveRootName = inputImageName.toString();
+            this.saveRootName = inputImageName.toString();
             int dotIndex = saveRootName.lastIndexOf('.');
             if (dotIndex > 0) {
                 saveRootName = saveRootName.substring(0, dotIndex);
             }
-            log.info("save root " + saveRootName);
+            log.info("save root " + this.saveRootName);
 
             // Load the image to process.
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
@@ -482,12 +484,12 @@ public class smFRETSpotFinder implements Command {
             }
 
             // save analysis results.
-            String masksFileName = saveRootName + "_masks.tif";
-            String spotsFileName = saveRootName +  "_spots.csv";
+            String masksFileName = this.saveRootName + "_spotf_masks.tif";
+            String spotsFileName = this.saveRootName +  "_spotf_spots.csv";
 
             // JSON file w/ analysis parameters, etc.
             Map<String, Object> mapping = new HashMap<>();
-            mapping.put("root name", saveRootName);
+            mapping.put("root name", this.saveRootName);
             mapping.put("image name", inputImageName);
             mapping.put("mapping file", mappingFile);
             mapping.put("masks file", masksFileName);
@@ -497,21 +499,21 @@ public class smFRETSpotFinder implements Command {
             mapping.put("camera gain", cameraGain);
 
             ObjectMapper mapper = new ObjectMapper();
-            File saveFile = new File(saveRootName + "_spot_finding.json");
+            File saveFile = new File(this.saveRootName + "_spotf_finding.json");
             mapper.writeValue(saveFile, mapping);
 
             // Table w/ spot locations.
             saveSpotLocations(spotsFileName, filteredSpots);
 
             // QC image w/ identified spots.
-            FileSaver sourceFile = new FileSaver(sumImage);
-            sourceFile.saveAsTiff(saveRootName + "_spot_qc_image.tif");
+            FileSaver qcImageSaver = new FileSaver(sumImage);
+            qcImageSaver.saveAsTiff(this.saveRootName + "_spotf_qc_image.tif");
 
             // Masks that will be needed for extracting time traces.
             Concatenator cctr = new Concatenator();
             ImagePlus maskImages = cctr.concatenate(this.overlapMask, this.backgroundMask, false);
-            sourceFile = new FileSaver(maskImages);
-            sourceFile.saveAsTiff(masksFileName);
+            FileSaver masksImageSaver = new FileSaver(maskImages);
+            masksImageSaver.saveAsTiff(masksFileName);
 
 	        log.info("finishing spot finding");
         } catch (Exception e) {

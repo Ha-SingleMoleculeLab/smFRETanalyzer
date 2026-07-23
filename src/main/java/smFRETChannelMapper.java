@@ -47,11 +47,12 @@ public class smFRETChannelMapper implements Command {
     Integer endSlice = 30;
 
     // Member variables.
+    private final boolean diagnostic_mode = true;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
-    private final String workingImagePathAndFileName = IJ.getDirectory("temp") + "-" + UUID.randomUUID() + "-scratch.tif";
-    private String transformString = null;      // Transform string to pass to TurboReg.
     private int mapImageWidth = 0;              // Expected image width for the transform.
     private int mapImageHeight = 0;             // Expected image height for the transform.
+    private String transformString = null;      // Transform string to pass to TurboReg.
+    private final String workingImagePathAndFileName = IJ.getDirectory("temp") + "-" + UUID.randomUUID() + "-scratch.tif";
 
     /**
      * Average an ImagePlus image stack.
@@ -71,8 +72,7 @@ public class smFRETChannelMapper implements Command {
         if (iEnd > image.getNSlices()) { iEnd = image.getNSlices(); }
 
         log.info("averaging slices " + iStart + " to " + iEnd);
-        ImagePlus averageImage = ZProjector.run(image, "ave", iStart, iEnd);
-        return averageImage;
+        return ZProjector.run(image, "ave", iStart, iEnd);
     }
 
     /**
@@ -223,6 +223,11 @@ public class smFRETChannelMapper implements Command {
             log.info("calculating average image and splitting - " + inputImage.getNSlices() + " slices");
             ImagePlus averageImage = averageImagePlus(inputImage, startSlice, endSlice);
 
+            FileSaver averageImageFileSaver = new FileSaver(averageImage);
+            if (this.diagnostic_mode){
+                averageImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_image.tif");
+            }
+
             // Split average vertically.
             //
             // I spent a lot of time trying to figure out how to do this in memory in a way that was compatible
@@ -237,11 +242,21 @@ public class smFRETChannelMapper implements Command {
             String averageImageTargetFilename = saveTempImageFile(averageImageTarget);
             log.info("target image " + averageImageTargetFilename);
 
+            FileSaver targetImageFileSaver = new FileSaver(averageImageTarget);
+            if (this.diagnostic_mode){
+                targetImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_target.tif");
+            }
+
             // Source image.
             ImagePlus averageImageSource = images.get(1);
             averageImageSource.setTitle("average_image_source");
             String averageImageSourceFilename = saveTempImageFile(averageImageSource);
             log.info("source image " + averageImageSourceFilename);
+
+            FileSaver sourceImageFileSaver = new FileSaver(averageImageSource);
+            if (this.diagnostic_mode){
+                sourceImageFileSaver.saveAsTiff(saveRootName + "_mapping_average_source.tif");
+            }
 
             // Find correspondence using TurboReg.
             //
@@ -328,10 +343,10 @@ public class smFRETChannelMapper implements Command {
             rgbImageQCImage.setTitle("mapping QC image");
 
             // Save QC image.
-            FileSaver sourceFileSaver = new FileSaver(rgbImageQCImage);
+            FileSaver qcImageFileSaver = new FileSaver(rgbImageQCImage);
             String pathAndFileName = saveRootName + "_mapping_qc_image.tif";
             log.info(pathAndFileName);
-            sourceFileSaver.saveAsTiff(pathAndFileName);
+            qcImageFileSaver.saveAsTiff(pathAndFileName);
 
             log.info("finishing channel mapping");
 

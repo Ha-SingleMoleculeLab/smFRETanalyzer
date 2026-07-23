@@ -86,10 +86,8 @@ public class smFRETSpotFinder implements Command {
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImagePlus backgroundImage;
-        log.info("start");
         backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
         backgroundImage = maskInpaint(backgroundImage, backgroundMask, (double) spotSpacing);         // Fill in regions w/ spots.
-        log.info("stop");
         backgroundImage.setTitle("background_image");
         return backgroundImage;
     }
@@ -253,7 +251,6 @@ public class smFRETSpotFinder implements Command {
     private ImagePlus maskInpaint(ImagePlus image, ImagePlus mask, double sigma){
         ImagePlus filledImage = image.duplicate();
         ImagePlus lastFilledImage = image.duplicate();
-        log.info("maskInpaint");
 
         ImageProcessor imp = filledImage.getProcessor();
         for (int i = 0; i < 200; i++){
@@ -261,7 +258,7 @@ public class smFRETSpotFinder implements Command {
             if (maskInpaintDifference(filledImage, lastFilledImage, mask) < 1){
                 maskInpaintReset(image, filledImage, mask);
                 if (diagnostic_mode) {
-                    log.info("converged after " + i);
+                    log.info("converged in " + i);
                 }
                 break;
             }
@@ -402,13 +399,13 @@ public class smFRETSpotFinder implements Command {
         Polygon filteredSpots = new Polygon();
 
         ImagePlus fgSmooth = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
-        ImageProcessor imp = fgSmooth.getProcessor();
-        imp.blurGaussian(spotSigma);
+        ImageProcessor impFg = fgSmooth.getProcessor();
+        impFg.blurGaussian(spotSigma);
         fgSmooth.setTitle("foreground_smooth");
 
         ImagePlus bgSmooth = backgroundImage.duplicate();
-        imp = fgSmooth.getProcessor();
-        imp.blurGaussian(spotSigma);
+        ImageProcessor impBg = fgSmooth.getProcessor();
+        impBg.blurGaussian(spotSigma);
         bgSmooth.setTitle("background_smooth");
 
         // In order to calculate the SNR integrated over the spot we need the integrated magnitude

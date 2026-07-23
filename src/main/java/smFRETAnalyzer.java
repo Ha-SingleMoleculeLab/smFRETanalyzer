@@ -10,13 +10,6 @@ import ij.io.FileSaver;
 import ij.plugin.Filters3D;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
-import net.imglib2.RandomAccessible;
-import net.imglib2.RandomAccessibleInterval;
-import net.imglib2.img.Img;
-import net.imglib2.img.array.ArrayImgs;
-import net.imglib2.img.display.imagej.ImageJFunctions;
-import net.imglib2.type.numeric.real.FloatType;
-import net.imglib2.view.Views;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Parameter;
@@ -63,10 +56,8 @@ public class smFRETAnalyzer implements Command {
     public java.util.List<ImagePlus> backGroundEstimation(ImagePlus image) {
 
         // Mean filter on z axis.
-        Filters3D flt3D = new Filters3D();
-        ImageStack imageS = image.getStack();
-        ImageStack imageZFlt = flt3D.filter(imageS, Filters3D.MEAN, 1, 1, backgroundAverageNFrames);
-        ImagePlus imageZFltImp = new ImagePlus("time smoothed", imageZFlt);
+        // FIXME: Use 0.5 for x/y radius?
+        ImageStack imageZFlt = Filters3D.filter(image.getStack(), Filters3D.MEAN, 1, 1, backgroundAverageNFrames);
 
         // Split into two separate stacks, one for each channel.
         ImageStack targetBg = new ImageStack();
@@ -76,11 +67,10 @@ public class smFRETAnalyzer implements Command {
         ImagePlus targetImgEst = null;
         ImagePlus sourceImgEst = null;
         for (int i = 1; i <= imageZFlt.size(); i++){
-            //IJ.showProgress(i, imageZFlt.size());
             IJ.showProgress((double)i/((double)imageZFlt.size()));
 
             // Get slice from stack.
-            ImageProcessor ipZ = imageZFltImp.getStack().getProcessor(i);
+            ImageProcessor ipZ = imageZFlt.getProcessor(i);
             ImagePlus tmp = new ImagePlus("tmp", ipZ);
 
             // Split and transform source to target.
@@ -121,6 +111,59 @@ public class smFRETAnalyzer implements Command {
     }
 
     /**
+     * Trace extraction.
+     *
+     * Result data format is [time , spot], w/ per spot data in order target, source.
+     */
+    public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, Polygon spots, double spotSigma, double cameraGain){
+        ImageStack imageS = image.getStack();
+        // Duplicating so we don't modify the input image.
+        ImageStack targetBg = bgEstimates.get(0).getStack().duplicate();
+        ImageStack sourceBg = bgEstimates.get(1).getStack().duplicate();
+        double[][] timeTraces = new double[imageS.getSize()][2*spots.npoints];
+
+        log.info("measuring time traces");
+        double norm = 2.0*Math.PI*spotSigma*spotSigma;
+        for (int i = 1; i <= imageS.size(); i++) {
+            IJ.showProgress((double) i / ((double) imageS.size()));
+
+            // Get slice from stack.
+            ImageProcessor ipZ = imageS.getProcessor(i);
+            ImagePlus tmp = new ImagePlus("tmp", ipZ);
+
+            // Split, transform source to target and Gaussian smoothing.
+            java.util.List<ImagePlus> splitImages = smfsf.splitImagePlus(tmp);
+            ImagePlus targetImgI = splitImages.get(0);
+            ImageProcessor targetImgIImp = targetImgI.getProcessor();
+            targetImgIImp.blurGaussian(spotSigma);
+
+            ImagePlus sourceImgI = splitImages.get(1);
+            ImageProcessor sourceImgIImp = sourceImgI.getProcessor();
+            sourceImgIImp.blurGaussian(spotSigma);
+
+            // Gaussian smoothing of background.
+            ImagePlus targetImgIBg = new ImagePlus("tmp_fg", targetBg.getProcessor(i));
+            ImageProcessor targetImgIBgImp = targetImgIBg.getProcessor();
+            targetImgIBgImp.blurGaussian(spotSigma);
+
+            ImagePlus sourceImgIBg = new ImagePlus("tmp_bg", sourceBg.getProcessor(i));
+            ImageProcessor sourceImgIBgImp = sourceImgIBg.getProcessor();
+            sourceImgIBgImp.blurGaussian(spotSigma);
+
+            // Record spot intensities in both channels.
+            for (int j = 0; j < spots.npoints; j++) {
+                int x = spots.xpoints[j];
+                int y = spots.ypoints[j];
+
+                timeTraces[i-1][2 * j] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
+                timeTraces[i-1][2 * j + 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
+            }
+        }
+
+        return timeTraces;
+    }
+
+    /**
      * Run ...
      */
     @Override
@@ -131,7 +174,7 @@ public class smFRETAnalyzer implements Command {
             // Load spot JSON file w/ the analysis parameters.
             ObjectMapper mapper = new ObjectMapper();
             Map<String, Object> mapping = mapper.readValue(spotJSONFile, HashMap.class);
-            this.saveRootName = (String) mapping.get("root name");
+            saveRootName = (String) mapping.get("root name");
             String inputImageName = (String) mapping.get("image name");
             String mappingFileName = (String) mapping.get("mapping file");
             String masksFileName = (String) mapping.get("masks file");
@@ -161,15 +204,10 @@ public class smFRETAnalyzer implements Command {
 
             // Measure spot time traces.
             log.info("measuring time traces");
+            double[][] timeTraces = measureTimeTraces(image, bgEstimates, spots, spotSigma, cameraGain);
+            log.info(timeTraces.length + " " + timeTraces[0].length);
 
             // Save time traces.
-
-            /*
-            if (!isHeadless) {
-                ui.show(smfsf.overlapMask);
-                ui.show(smfsf.backgroundMask);
-            }
-            */
 
             log.info("finishing time trace measurement");
         } catch (Exception e) {

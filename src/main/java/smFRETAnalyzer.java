@@ -57,6 +57,8 @@ public class smFRETAnalyzer implements Command {
 
         // Mean filter on z axis.
         // FIXME: Use 0.5 for x/y radius?
+        // FIXME: Not sure how edge pixels are handled. Could be an issue if there is a
+        //        a large delta w/ time at the beginning/end of the movie.
         ImageStack imageZFlt = Filters3D.filter(image.getStack(), Filters3D.MEAN, 1, 1, backgroundAverageNFrames);
 
         // Split into two separate stacks, one for each channel.
@@ -187,6 +189,8 @@ public class smFRETAnalyzer implements Command {
 
             // Initialize spot finder object.
             smfsf.log = log;
+            smfsf.spotMargin = (Integer) mapping.get("spot margin");
+            smfsf.edgeMargin = (Integer) mapping.get("edge margin");
             smfsf.loadMappingJSON(mappingFileName);
             smfsf.loadMasks(masksFileName);
             Polygon spots = smfsf.loadSpotLocations(spotsFileName);

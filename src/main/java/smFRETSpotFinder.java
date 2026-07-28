@@ -26,6 +26,7 @@ import org.slf4j.IMarkerFactory;
 
 import java.awt.*;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -51,8 +52,14 @@ public class smFRETSpotFinder implements Command {
     @Parameter (description = "last slice for averaging", min = "1")
     Integer endSlice = 30;
 
-    @Parameter (description = "spot size detection threshold", min = "1.0")
-    Double spotThreshold = 8.0;
+    @Parameter (description = "spot SNR detection threshold", min = "1.0")
+    Double spotThreshold = 6.0;
+
+    @Parameter (description = "spot tolerance threshold (for MaximaFinder plugin)", min = "1.0")
+    Double spotTolerance = 10.0;
+
+    @Parameter (description = "spot prominence compared to pixels on 2 x spot Sigma radius", min = "1.0")
+    Double spotProminence = 1.8;
 
     @Parameter (description = "spot size (sigma, pixels)", min = "0.2")
     Double spotSigma = 2.0;
@@ -64,7 +71,10 @@ public class smFRETSpotFinder implements Command {
     Double cameraGain = 1.0;
 
     @Parameter (description = "minimum allowed distance between spots (pixels)", min = "1")
-    Integer spotSpacing = 5;
+    Integer spotSpacing = 3;
+
+    @Parameter (description = "radius to mask as foreground around a spot (pixels)", min = "1")
+    Integer spotMargin = 4;
 
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
@@ -86,8 +96,8 @@ public class smFRETSpotFinder implements Command {
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImagePlus backgroundImage;
-        backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);  // Fill around edges of the image.
-        backgroundImage = maskInpaint(backgroundImage, backgroundMask, (double) spotSpacing);         // Fill in regions w/ spots.
+        backgroundImage = maskInpaint(image, overlapMask, 2 * (double) edgeMargin);    // Fill around edges of the image.
+        backgroundImage = maskInpaint(backgroundImage, backgroundMask, spotMargin);          // Fill in regions w/ spots.
         backgroundImage.setTitle("background_image");
         return backgroundImage;
     }
@@ -162,7 +172,7 @@ public class smFRETSpotFinder implements Command {
             ImageProcessor ip = temp.getProcessor();
             ip.setColor(1);
             ip.setLineWidth(0);
-            ip.fillOval(x-radius, y-radius, 2*radius, 2*radius);
+            ip.fillOval(x-radius, y-radius, 2*radius+1, 2*radius+1);
             temp.updateAndDraw();
             ImageCalculator.run(neighborhoodMask, temp, "add");
         }
@@ -190,12 +200,12 @@ public class smFRETSpotFinder implements Command {
      */
     public static Overlay getSpotOverlay (Polygon spots, int radius, Color symbolColor) {
         Overlay ov = new Overlay();
-        int diameter = 2 * radius;
+        double diameter = 2.0 * (double)radius;
         for (int i = 0; i < spots.npoints; i++) {
-            int x = spots.xpoints[i];
-            int y = spots.ypoints[i];
+            double x = spots.xpoints[i] + 0.5;
+            double y = spots.ypoints[i] + 0.5;
             Roi roi = new Roi(x - radius, y - radius,
-                    diameter, diameter, diameter);
+                    diameter, diameter, (int)diameter);
             roi.setStrokeColor(symbolColor);
             ov.add(roi);
         }
@@ -203,7 +213,7 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Load an existing mapping file to initialize smFRETChannelMapper.
+     * Load an existing mapping JSON file to initialize smFRETChannelMapper.
      */
     public void loadMappingJSON(String mappingFileName){
         smfcm.loadMappingJSON(mappingFileName);
@@ -373,16 +383,33 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Remove spots where mask is 0.
+     * Remove spots with low prominence.
      */
-    private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask){
+    private Polygon spotFilterProminence(Polygon spots, ImagePlus sumImage, ImagePlus backgroundImage) {
         Polygon filteredSpots = new Polygon();
 
+        int srad = (int)(Math.round(2.0*spotSigma));
+        ImagePlus fgImage = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
         for (int i = 0; i < spots.npoints; i++) {
             int x = spots.xpoints[i];
             int y = spots.ypoints[i];
 
-            if (mask.getPixel(x,y)[0] > 0){
+            boolean good = true;
+            int threshold = (int)(Math.round((double)fgImage.getPixel(x,y)[0]/spotProminence));
+            for (int rx = -srad; rx <= srad; rx += 1){
+                for (int ry = -srad; ry <= srad; ry += 1){
+                    if (rx*rx+ry*ry >= (srad-1)*(srad-1) && rx*rx+ry*ry <= (srad+1)*(srad+1)){
+                        if (fgImage.getPixel(x+rx,y+ry)[0] > threshold) {
+                            good = false;
+                            break;
+                        }
+                    }
+                }
+                if (!good){
+                    break;
+                }
+            }
+            if (good){
                 filteredSpots.addPoint(x,y);
             }
         }
@@ -419,7 +446,6 @@ public class smFRETSpotFinder implements Command {
             double fg = norm*cameraGain*(fgSmooth.getPixel(x,y)[0]);
             double bg = norm*cameraGain*(bgSmooth.getPixel(x,y)[0] - 2*cameraBlackLevel);
 
-
             if (bg > 1){
                 bg = Math.sqrt(bg);
             }
@@ -441,6 +467,24 @@ public class smFRETSpotFinder implements Command {
 
             FileSaver bgSmoothImageSaver = new FileSaver(bgSmooth);
             bgSmoothImageSaver.saveAsTiff(saveRootName + "_spotf_bg_smooth.tif");
+        }
+
+        return filteredSpots;
+    }
+
+    /**
+     * Remove spots where mask is 0.
+     */
+    private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask){
+        Polygon filteredSpots = new Polygon();
+
+        for (int i = 0; i < spots.npoints; i++) {
+            int x = spots.xpoints[i];
+            int y = spots.ypoints[i];
+
+            if (mask.getPixel(x,y)[0] > 0){
+                filteredSpots.addPoint(x,y);
+            }
         }
 
         return filteredSpots;
@@ -483,7 +527,8 @@ public class smFRETSpotFinder implements Command {
             // find all spots in tne sum image.
             ImageProcessor sumImageProc = sumImage.getProcessor();
             MaximumFinder mf = new MaximumFinder();
-            Polygon allSpots = mf.getMaxima(sumImageProc, 5, true);
+            Polygon allSpots = mf.getMaxima(sumImageProc, spotTolerance, true);
+            log.info("initial spot number " + allSpots.npoints);
 
             // filter spots that are near the edges of either channel.
             // overlapMask because this is where the channels overlap.
@@ -494,15 +539,21 @@ public class smFRETSpotFinder implements Command {
             ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
             proximityMask = neighborhoodMaskToProximityMask(proximityMask);
             filteredSpots = spotFilterWithMask(filteredSpots, proximityMask);
+            log.info("after proximity filter " + filteredSpots.npoints);
 
             // filter low SNR spots.
-            backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotSpacing);
+            backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotMargin);
             backgroundMask = neighborhoodMaskToBackgroundMask(backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
+            log.info("after SNR filter " + filteredSpots.npoints);
+
+            // filter low prominence spots.
+            filteredSpots = spotFilterProminence(filteredSpots, sumImage, backgroundImage);
+            log.info("after prominence filter " + filteredSpots.npoints);
 
             // display as overlay on sum image.
-            Overlay ov = getSpotOverlay(filteredSpots, spotSpacing, Color.GREEN);
+            Overlay ov = getSpotOverlay(filteredSpots, spotMargin, Color.GREEN);
             sumImage.setOverlay(ov);
 
             if (!isHeadless) {
@@ -515,14 +566,18 @@ public class smFRETSpotFinder implements Command {
 
             // JSON file w/ analysis parameters, etc.
             Map<String, Object> mapping = new HashMap<>();
-            mapping.put("root name", saveRootName);
+            mapping.put("camera black", cameraBlackLevel);
+            mapping.put("camera gain", cameraGain);
+            mapping.put("edge margin", edgeMargin);
             mapping.put("image name", inputImageName);
             mapping.put("mapping file", mappingFile);
             mapping.put("masks file", masksFileName);
+            mapping.put("root name", saveRootName);
             mapping.put("spots file", spotsFileName);
+            mapping.put("spot margin", spotMargin);
+            mapping.put("spot prominence", spotProminence);
             mapping.put("spot sigma", spotSigma);
-            mapping.put("camera black", cameraBlackLevel);
-            mapping.put("camera gain", cameraGain);
+            mapping.put("spot tolerance", spotTolerance);
 
             ObjectMapper mapper = new ObjectMapper();
             File saveFile = new File(saveRootName + "_spotf_finding.json");

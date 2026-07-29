@@ -3,6 +3,7 @@
  */
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.io.LittleEndianDataOutputStream;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
@@ -18,6 +19,7 @@ import org.scijava.ui.UIService;
 
 import java.awt.*;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -47,6 +49,7 @@ public class smFRETAnalyzer implements Command {
     private final boolean diagnostic_mode = true;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private String saveRootName;
+    private final boolean saveAsTraces = true;
     private final smFRETSpotFinder smfsf = new smFRETSpotFinder();
 
     /**
@@ -68,7 +71,11 @@ public class smFRETAnalyzer implements Command {
         IJ.showStatus("Background estimation..");
         ImagePlus targetImgEst = null;
         ImagePlus sourceImgEst = null;
+        int stepSize = Math.max(imageZFlt.size()/100, 1);
         for (int i = 1; i <= imageZFlt.size(); i++){
+            if (i%stepSize == 0){
+                log.info("processing " + i + " of " + imageZFlt.size() + " images");
+            }
             IJ.showProgress((double)i/((double)imageZFlt.size()));
 
             // Get slice from stack.
@@ -88,9 +95,7 @@ public class smFRETAnalyzer implements Command {
             targetBg.addSlice(targetImgEst.getProcessor());
             sourceBg.addSlice(sourceImgEst.getProcessor());
 
-            if(diagnostic_mode){
-                log.info("");
-            }
+            //log.info("");
         }
 
         ImagePlus targetBgImp = new ImagePlus("target background estimate", targetBg);
@@ -115,18 +120,22 @@ public class smFRETAnalyzer implements Command {
     /**
      * Trace extraction.
      *
-     * Result data format is [time , spot], w/ per spot data in order target, source.
+     * Result data format is [spot, time], w/ per spot time data in order target, source.
      */
     public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, Polygon spots, double spotSigma, double cameraGain){
         ImageStack imageS = image.getStack();
         // Duplicating so we don't modify the input image.
         ImageStack targetBg = bgEstimates.get(0).getStack().duplicate();
         ImageStack sourceBg = bgEstimates.get(1).getStack().duplicate();
-        double[][] timeTraces = new double[imageS.getSize()][2*spots.npoints];
+        double[][] timeTraces = new double[2*spots.npoints][imageS.getSize()];
 
-        log.info("measuring time traces");
+        IJ.showStatus("Measuring time traces..");
         double norm = 2.0*Math.PI*spotSigma*spotSigma;
+        int stepSize = Math.max(imageS.size()/100, 1);
         for (int i = 1; i <= imageS.size(); i++) {
+            if (i%stepSize == 0){
+                log.info("processing " + i + " of " + imageS.size() + " images");
+            }
             IJ.showProgress((double) i / ((double) imageS.size()));
 
             // Get slice from stack.
@@ -157,8 +166,8 @@ public class smFRETAnalyzer implements Command {
                 int x = spots.xpoints[j];
                 int y = spots.ypoints[j];
 
-                timeTraces[i-1][2 * j] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
-                timeTraces[i-1][2 * j + 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
+                timeTraces[2 * j][i - 1] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
+                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
             }
         }
 
@@ -211,7 +220,24 @@ public class smFRETAnalyzer implements Command {
             double[][] timeTraces = measureTimeTraces(image, bgEstimates, spots, spotSigma, cameraGain);
             log.info(timeTraces.length + " " + timeTraces[0].length);
 
-            // Save time traces.
+            // Save time traces in '.traces' format, which is:
+            //
+            // 4 bytes - length of traces.
+            // 2 bytes - number of traces.
+            // 2 * (length of traces) * (number of traces) in order [time][trace number].
+            //
+            if (saveAsTraces){
+                //DataOutputStream tracesDos = new DataOutputStream(new FileOutputStream(saveRootName + ".traces"));
+                LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(saveRootName + ".traces"));
+                tracesDos.writeInt(timeTraces[0].length);   // Length of traces.
+                tracesDos.writeShort(timeTraces.length/2); // Number of traces.
+
+                for (int j = 0; j < timeTraces[0].length; j++){
+                    for (int i = 0; i < timeTraces.length; i++){
+                        tracesDos.writeShort((short)Math.round(timeTraces[i][j]));
+                    }
+                }
+            }
 
             log.info("finishing time trace measurement");
         } catch (Exception e) {

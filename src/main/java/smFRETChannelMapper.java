@@ -12,9 +12,7 @@ import java.util.*;
 
 import ij.IJ;
 import ij.ImagePlus;
-import ij.io.FileOpener;
 import ij.io.FileSaver;
-import ij.io.Opener;
 import ij.plugin.RGBStackMerge;
 import ij.plugin.ZProjector;
 import ij.process.ImageConverter;

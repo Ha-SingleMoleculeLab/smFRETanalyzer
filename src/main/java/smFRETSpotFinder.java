@@ -7,26 +7,20 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.gui.Overlay;
 import ij.gui.Roi;
-import ij.io.FileInfo;
 import ij.io.FileSaver;
-import ij.io.Opener;
 import ij.measure.ResultsTable;
 import ij.plugin.Concatenator;
 import ij.plugin.ImageCalculator;
 import ij.plugin.filter.MaximumFinder;
-import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
-import net.imglib2.algorithm.componenttree.pixellist.PixelList;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
-import org.slf4j.IMarkerFactory;
 
 import java.awt.*;
 import java.io.File;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -267,9 +261,7 @@ public class smFRETSpotFinder implements Command {
             imp.blurGaussian(sigma);
             if (maskInpaintDifference(filledImage, lastFilledImage, mask) < 1){
                 maskInpaintReset(image, filledImage, mask);
-                if (diagnostic_mode) {
-                    log.info("converged in " + i);
-                }
+                //log.info("converged in " + i);
                 break;
             }
             maskInpaintReset(image, filledImage, mask);

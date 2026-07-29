@@ -15,21 +15,13 @@
     <artifactId>smFRETAnalyzer</artifactId>
     <version>1.0.0-SNAPSHOT</version>
 
-    <!--
-    <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    </properties>
-    -->
-
     <name>Single Molecule FRET analysis</name>
     <description>This plugin is used to analyze two channel single molecule FRET data.</description>
     <url>https://github.com/[MY-ORG]/[MY-REPO]</url>
     <inceptionYear>2026</inceptionYear>
     <organization>
-        <name>[MY-ORGANIZATION-NAME]</name>
-        <url>[MY-ORGANIZATION-WEB-SITE]</url>
+        <name>taekjip-ha-lab</name>
+        <url>https://sites.google.com/site/taekjiphalab</url>
     </organization>
     <licenses>
         <license>
@@ -41,8 +33,8 @@
 
     <developers>
         <developer>
-            <id>[MY-GITHUB-ID]</id>
-            <name>[MY-FULL-NAME]</name>
+            <id>HazenBabcock</id>
+            <name>Hazen Babcock</name>
             <url>https://imagej.net/User:[MY-IMAGEJ-WIKI-ACCOUNT]</url>
         </developer>
     </developers>

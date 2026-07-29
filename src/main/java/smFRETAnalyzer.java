@@ -11,6 +11,7 @@ import ij.ImagePlus;
 import ij.ImageStack;
 import ij.io.FileSaver;
 import ij.plugin.Filters3D;
+import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
 import org.scijava.command.Command;
@@ -150,19 +151,23 @@ public class smFRETAnalyzer implements Command {
             // Split, transform source to target and Gaussian smoothing.
             java.util.List<ImagePlus> splitImages = smfsf.splitImagePlus(tmp);
             ImagePlus targetImgI = splitImages.get(0);
+            new ImageConverter(targetImgI).convertToGray32();
             ImageProcessor targetImgIImp = targetImgI.getProcessor();
             targetImgIImp.blurGaussian(spotSigma);
 
             ImagePlus sourceImgI = splitImages.get(1);
+            new ImageConverter(sourceImgI).convertToGray32();
             ImageProcessor sourceImgIImp = sourceImgI.getProcessor();
             sourceImgIImp.blurGaussian(spotSigma);
 
             // Gaussian smoothing of background.
             ImagePlus targetImgIBg = new ImagePlus("tmp_fg", targetBg.getProcessor(i));
+            new ImageConverter(targetImgIBg).convertToGray32();
             ImageProcessor targetImgIBgImp = targetImgIBg.getProcessor();
             targetImgIBgImp.blurGaussian(spotSigma);
 
             ImagePlus sourceImgIBg = new ImagePlus("tmp_bg", sourceBg.getProcessor(i));
+            new ImageConverter(sourceImgIBg).convertToGray32();
             ImageProcessor sourceImgIBgImp = sourceImgIBg.getProcessor();
             sourceImgIBgImp.blurGaussian(spotSigma);
 
@@ -171,8 +176,12 @@ public class smFRETAnalyzer implements Command {
                 int x = spots.xpoints[j];
                 int y = spots.ypoints[j];
 
-                timeTraces[2 * j][i - 1] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
-                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
+                timeTraces[2 * j][i - 1] = norm * cameraGain * (targetImgIImp.getValue(x, y) - targetImgIBgImp.getValue(x, y));
+                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * (sourceImgIImp.getValue(x, y) - sourceImgIBgImp.getValue(x, y));
+
+//                timeTraces[2 * j][i - 1] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
+//                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
+
             }
         }
 

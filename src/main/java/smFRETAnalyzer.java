@@ -2,6 +2,8 @@
  * This class handles extracts the time traces using the mapping and spot locations.
  */
 
+import ch.systemsx.cisd.hdf5.HDF5Factory;
+import ch.systemsx.cisd.hdf5.IHDF5Writer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.io.LittleEndianDataOutputStream;
 import ij.IJ;
@@ -20,6 +22,9 @@ import org.scijava.ui.UIService;
 import java.awt.*;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -175,6 +180,72 @@ public class smFRETAnalyzer implements Command {
     }
 
     /**
+     * Save in HDF5 format.
+     */
+    private void saveToHDF5File(String hdf5FileName, double [][] timeTraces, Polygon spots) {
+        try {
+            IHDF5Writer writer = HDF5Factory.configure(hdf5FileName).writer();
+
+            // Some analysis metadata.
+            writer.writeString("spot-json-file", spotJSONFile.toString());
+            writer.writeInt("background-average-n-frames", backgroundAverageNFrames.shortValue());
+
+            String spotJSONFileContents = new String(Files.readAllBytes(Paths.get(spotJSONFile.toString())));
+            writer.writeString("spot-json-file-contents", spotJSONFileContents);
+
+            // Save spot locations (in target channel).
+            float[][] spotsxy = new float[spots.npoints][2];
+            for (int i = 0; i < spots.npoints; i++) {
+                spotsxy[i][0] = spots.xpoints[i];
+                spotsxy[i][1] = spots.ypoints[i];
+            }
+            writer.writeFloatMatrix("spots-xy", spotsxy);
+
+            // Split time trace data into target, source so that indexing matches spots.
+            float[][] targetTraces = new float[timeTraces.length / 2][timeTraces[0].length];
+            float[][] sourceTraces = new float[timeTraces.length / 2][timeTraces[0].length];
+            for (int i = 0; i < targetTraces.length; i++){
+                for (int j = 0; j < targetTraces[0].length; j++) {
+                    targetTraces[i][j] = (float)timeTraces[2*i][j];
+                    sourceTraces[i][j] = (float)timeTraces[2*i+1][j];
+                }
+            }
+            writer.writeFloatMatrix("target-traces", targetTraces);
+            writer.writeFloatMatrix("source-traces", sourceTraces);
+
+            writer.close();
+        } catch (Exception e) {
+            log.info(e);
+            IJ.handleException(e);
+        }
+    }
+
+    /**
+     * Save in the .traces format, which is:
+     *
+     * int32 (Int) - length of traces.
+     * int16 (Short) - number of traces.
+     * int16 (Short) - 2 * (length of traces) * (number of traces) in order [time][trace number].
+     */
+    private void saveToTracesFile(String tracesFileName, double [][] timeTraces){
+        try {
+            //DataOutputStream tracesDos = new DataOutputStream(new FileOutputStream(saveRootName + ".traces"));
+            LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(tracesFileName));
+            tracesDos.writeInt(timeTraces[0].length);   // Length of traces.
+            tracesDos.writeShort(timeTraces.length / 2); // Number of traces.
+
+            for (int j = 0; j < timeTraces[0].length; j++) {
+                for (int i = 0; i < timeTraces.length; i++) {
+                    tracesDos.writeShort((short) Math.round(timeTraces[i][j]));
+                }
+            }
+        } catch (Exception e) {
+            log.info(e);
+            IJ.handleException(e);
+        }
+    }
+
+    /**
      * Run ...
      */
     @Override
@@ -220,24 +291,13 @@ public class smFRETAnalyzer implements Command {
             double[][] timeTraces = measureTimeTraces(image, bgEstimates, spots, spotSigma, cameraGain);
             log.info(timeTraces.length + " " + timeTraces[0].length);
 
-            // Save time traces in '.traces' format, which is:
-            //
-            // 4 bytes - length of traces.
-            // 2 bytes - number of traces.
-            // 2 * (length of traces) * (number of traces) in order [time][trace number].
-            //
+            // Save time traces in '.traces' format:
             if (saveAsTraces){
-                //DataOutputStream tracesDos = new DataOutputStream(new FileOutputStream(saveRootName + ".traces"));
-                LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(saveRootName + ".traces"));
-                tracesDos.writeInt(timeTraces[0].length);   // Length of traces.
-                tracesDos.writeShort(timeTraces.length/2); // Number of traces.
-
-                for (int j = 0; j < timeTraces[0].length; j++){
-                    for (int i = 0; i < timeTraces.length; i++){
-                        tracesDos.writeShort((short)Math.round(timeTraces[i][j]));
-                    }
-                }
+                saveToTracesFile(saveRootName + ".traces", timeTraces);
             }
+
+            // Save time traces, spot locations and metadata to .h5 file.
+            saveToHDF5File(saveRootName + ".h5", timeTraces, spots);
 
             log.info("finishing time trace measurement");
         } catch (Exception e) {

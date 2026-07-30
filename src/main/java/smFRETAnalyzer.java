@@ -128,12 +128,12 @@ public class smFRETAnalyzer implements Command {
      *
      * Result data format is [spot, time], w/ per spot time data in order target, source.
      */
-    public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, Polygon spots, double spotSigma, double cameraGain){
+    public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, double[][] spots, double spotSigma, double cameraGain){
         ImageStack imageS = image.getStack();
         // Duplicating so we don't modify the input image.
         ImageStack targetBg = bgEstimates.get(0).getStack().duplicate();
         ImageStack sourceBg = bgEstimates.get(1).getStack().duplicate();
-        double[][] timeTraces = new double[2*spots.npoints][imageS.getSize()];
+        double[][] timeTraces = new double[2*spots.length][imageS.getSize()];
 
         IJ.showStatus("Measuring time traces..");
         double norm = 2.0*Math.PI*spotSigma*spotSigma;
@@ -172,9 +172,9 @@ public class smFRETAnalyzer implements Command {
             sourceImgIBgImp.blurGaussian(spotSigma);
 
             // Record spot intensities in both channels.
-            for (int j = 0; j < spots.npoints; j++) {
-                int x = spots.xpoints[j];
-                int y = spots.ypoints[j];
+            for (int j = 0; j < spots.length; j++) {
+                int x = (int)spots[j][0];
+                int y = (int)spots[j][1];
 
                 timeTraces[2 * j][i - 1] = norm * cameraGain * (targetImgIImp.getValue(x, y) - targetImgIBgImp.getValue(x, y));
                 timeTraces[2 * j + 1][i - 1] = norm * cameraGain * (sourceImgIImp.getValue(x, y) - sourceImgIBgImp.getValue(x, y));
@@ -191,7 +191,7 @@ public class smFRETAnalyzer implements Command {
     /**
      * Save in HDF5 format.
      */
-    private void saveToHDF5File(String hdf5FileName, double [][] timeTraces, Polygon spots) {
+    private void saveToHDF5File(String hdf5FileName, double [][] timeTraces, double[][] spots) {
         try {
             IHDF5Writer writer = HDF5Factory.configure(hdf5FileName).writer();
 
@@ -203,12 +203,8 @@ public class smFRETAnalyzer implements Command {
             writer.writeString("spot-json-file-contents", spotJSONFileContents);
 
             // Save spot locations (in target channel).
-            float[][] spotsxy = new float[spots.npoints][2];
-            for (int i = 0; i < spots.npoints; i++) {
-                spotsxy[i][0] = spots.xpoints[i];
-                spotsxy[i][1] = spots.ypoints[i];
-            }
-            writer.writeFloatMatrix("spots-xy", spotsxy);
+            writer.writeString("spots-fields", smfsf.columnHeaders.toString());
+            writer.writeDoubleMatrix("spots", spots);
 
             // Split time trace data into target, source so that indexing matches spots.
             float[][] targetTraces = new float[timeTraces.length / 2][timeTraces[0].length];
@@ -282,8 +278,8 @@ public class smFRETAnalyzer implements Command {
             smfsf.edgeMargin = (Integer) mapping.get("edge margin");
             smfsf.loadMappingJSON(mappingFileName);
             smfsf.loadMasks(masksFileName);
-            Polygon spots = smfsf.loadSpotLocations(spotsFileName);
-            log.info("loaded " + spots.npoints + " spots");
+            double[][] spots = smfsf.loadSpotLocations(spotsFileName);
+            log.info("loaded " + spots.length + " spots");
 
             // Load image to process.
             ImagePlus image = new ImagePlus(inputImageName);
@@ -315,19 +311,3 @@ public class smFRETAnalyzer implements Command {
         }
     }
 }
-
-
-            /*
-            float[] data = new float[10];
-            for(int i = 0; i < 10; i++){
-                data[i] = (float)0.1;
-            }
-            long[] dimensions = new long[]{1, 1, 10};
-            RandomAccessibleInterval<FloatType> kernel = ArrayImgs.floats(data, dimensions);
-
-            Img<FloatType> imageW = ImageJFunctions.wrap(image);
-            //RandomAccessible<FloatType> imageWExt = Views.extendMirrorSingle(imageW);
-            Img<FloatType> imageZBoxcar = ops.create().img(imageW);
-            //Img<FloatType>imageZBoxcar = (Img<FloatType>) ops.filter().convolve(imageW, kernel);
-            ops.filter().convolve(imageZBoxcar, imageW, kernel);
-            */

@@ -118,6 +118,20 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
+     * Count the number of good spots.
+     */
+    private int countGoodSpots(double[][] spots){
+        int numGoodSpots = 0;
+
+        for (int i=0; i < spots.length; i++) {
+            if (spots[i][0] > 0.5){
+                numGoodSpots += 1;
+            }
+        }
+        return numGoodSpots;
+    }
+
+    /**
      * Creates the mask that is used to identify spots that are not in the overlap
      * region of both channels.
      *
@@ -156,12 +170,12 @@ public class smFRETSpotFinder implements Command {
      *
      * Spots on the pixels where this image is > 1 are filtered out.
      */
-    private ImagePlus createSpotsNeighborhoodMask(Polygon spots, int imageWidth, int imageHeight, int radius){
+    private ImagePlus createSpotsNeighborhoodMask(double[][] spots, int imageWidth, int imageHeight, int radius){
         ImagePlus neighborhoodMask = IJ.createImage("neighborhood_mask", "16-bit black", imageWidth, imageHeight, 1);
 
-        for (int i = 0; i < spots.npoints; i++) {
-            int x = spots.xpoints[i];
-            int y = spots.ypoints[i];
+        for (int i = 0; i < spots.length; i++) {
+            int x = (int)spots[i][1];
+            int y = (int)spots[i][2];
             ImagePlus temp = IJ.createImage("temp", "16-bit black", imageWidth, imageHeight, 1);
             ImageProcessor ip = temp.getProcessor();
             ip.setColor(1);
@@ -172,6 +186,25 @@ public class smFRETSpotFinder implements Command {
         }
 
         return neighborhoodMask;
+    }
+
+    /**
+     * Return maxima in the image as double array.
+     *
+     * The first element for each spot is whether it passes the current filters.
+     */
+    private double[][] getMaxima(ImagePlus image){
+        ImageProcessor imageProc = image.getProcessor();
+        MaximumFinder mf = new MaximumFinder();
+        Polygon spotsPoly = mf.getMaxima(imageProc, spotTolerance, true);
+
+        double[][] spotsArr = new double[spotsPoly.npoints][3];
+        for (int i=0; i < spotsPoly.npoints; i++){
+            spotsArr[i][0] = 1.0;
+            spotsArr[i][1] = spotsPoly.xpoints[i];
+            spotsArr[i][2] = spotsPoly.ypoints[i];
+        }
+        return spotsArr;
     }
 
     /**
@@ -192,16 +225,18 @@ public class smFRETSpotFinder implements Command {
      *  //               CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
      *  //               INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES.
      */
-    public static Overlay getSpotOverlay (Polygon spots, int radius, Color symbolColor) {
+    public static Overlay getSpotOverlay (double[][] spots, int radius, Color symbolColor) {
         Overlay ov = new Overlay();
         double diameter = 2.0 * (double)radius;
-        for (int i = 0; i < spots.npoints; i++) {
-            double x = spots.xpoints[i] + 0.5;
-            double y = spots.ypoints[i] + 0.5;
-            Roi roi = new Roi(x - radius, y - radius,
-                    diameter, diameter, (int)diameter);
-            roi.setStrokeColor(symbolColor);
-            ov.add(roi);
+        for (int i = 0; i < spots.length; i++) {
+            if (spots[i][0] > 0.5) {
+                double x = spots[i][1] + 0.5;
+                double y = spots[i][2] + 0.5;
+                Roi roi = new Roi(x - radius, y - radius,
+                        diameter, diameter, (int) diameter);
+                roi.setStrokeColor(symbolColor);
+                ov.add(roi);
+            }
         }
         return ov;
     }
@@ -349,16 +384,19 @@ public class smFRETSpotFinder implements Command {
     /**
      * Save spot locations as a table.
      */
-    private void saveSpotLocations(String spotsFileName, Polygon spots){
+    private void saveSpotLocations(String spotsFileName, double[][] spots){
         try {
             ResultsTable rt = new ResultsTable();
 
-            for (int i = 0; i < spots.npoints; i++) {
-                int x = spots.xpoints[i];
-                int y = spots.ypoints[i];
-                rt.incrementCounter();
-                rt.addValue("x", x);
-                rt.addValue("y", y);
+            for (int i = 0; i < spots.length; i++) {
+                // Only save good spots.
+                if (spots[i][0] > 0.5) {
+                    rt.incrementCounter();
+                    rt.addValue("x", spots[i][1]);
+                    rt.addValue("y", spots[i][2]);
+                    rt.addValue("snr", spots[i][3]);
+                    rt.addValue("prominence", spots[i][4]);
+                }
             }
             rt.saveAs(spotsFileName);
         } catch (Exception e) {
@@ -375,34 +413,37 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Remove spots with low prominence.
+     * Mark spots with prominence less than threshold.
      */
-    private Polygon spotFilterProminence(Polygon spots, ImagePlus sumImage, ImagePlus backgroundImage) {
-        Polygon filteredSpots = new Polygon();
+    private double[][] spotFilterProminence(double[][] spots, ImagePlus sumImage, ImagePlus backgroundImage) {
+        double[][] filteredSpots = new double[spots.length][spots[0].length+1];
+        int last_col = filteredSpots[0].length-1;
 
         int srad = (int)(Math.round(2.0*spotSigma));
         ImagePlus fgImage = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
-        for (int i = 0; i < spots.npoints; i++) {
-            int x = spots.xpoints[i];
-            int y = spots.ypoints[i];
+        for (int i = 0; i < spots.length; i++) {
+            System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
 
-            boolean good = true;
-            int threshold = (int)(Math.round((double)fgImage.getPixel(x,y)[0]/spotProminence));
+            int x = (int)spots[i][1];
+            int y = (int)spots[i][2];
+
+            // Calculate spot lowest prominence over pixels in circular neighborhood.
+            double spotHeight = (double)fgImage.getPixel(x,y)[0];
+            double lowestProminence = spotHeight;
             for (int rx = -srad; rx <= srad; rx += 1){
                 for (int ry = -srad; ry <= srad; ry += 1){
                     if (rx*rx+ry*ry >= (srad-1)*(srad-1) && rx*rx+ry*ry <= (srad+1)*(srad+1)){
-                        if (fgImage.getPixel(x+rx,y+ry)[0] > threshold) {
-                            good = false;
-                            break;
+                        double pixelHeight = Math.max(1, fgImage.getPixel(x+rx,y+ry)[0]);
+                        double prominence = spotHeight/pixelHeight;
+                        if (prominence < lowestProminence){
+                            lowestProminence = prominence;
                         }
                     }
                 }
-                if (!good){
-                    break;
-                }
             }
-            if (good){
-                filteredSpots.addPoint(x,y);
+            filteredSpots[i][last_col] = lowestProminence;
+            if (lowestProminence < spotProminence){
+                filteredSpots[i][0] = 0.0;
             }
         }
 
@@ -410,12 +451,13 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Remove spots with estimated SNR less than threshold.
+     * Mark spots with estimated SNR less than threshold.
      *
      * The factor of two for the camera black level is because we added the two channels together.
      */
-    private Polygon spotFilterSNR(Polygon spots, ImagePlus sumImage, ImagePlus backgroundImage){
-        Polygon filteredSpots = new Polygon();
+    private double[][] spotFilterSNR(double[][] spots, ImagePlus sumImage, ImagePlus backgroundImage){
+        double[][] filteredSpots = new double[spots.length][spots[0].length+1];
+        int last_col = filteredSpots[0].length-1;
 
         ImagePlus fgSmooth = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
         ImageProcessor impFg = fgSmooth.getProcessor();
@@ -431,9 +473,11 @@ public class smFRETSpotFinder implements Command {
         // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when
         // for our purposes a unit height Gaussian would have been the correct thing to use.
         double norm = 2.0*Math.PI*spotSigma*spotSigma;
-        for (int i = 0; i < spots.npoints; i++) {
-            int x = spots.xpoints[i];
-            int y = spots.ypoints[i];
+        for (int i = 0; i < spots.length; i++) {
+            System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
+
+            int x = (int)spots[i][1];
+            int y = (int)spots[i][2];
 
             double fg = norm*cameraGain*(fgSmooth.getPixel(x,y)[0]);
             double bg = norm*cameraGain*(bgSmooth.getPixel(x,y)[0] - 2*cameraBlackLevel);
@@ -448,8 +492,9 @@ public class smFRETSpotFinder implements Command {
             if (diagnostic_mode) {
                 log.info(x + " " + y + " " + fg + " " + " " + bg + " " + snr);
             }
-            if (snr > spotThreshold) {
-                filteredSpots.addPoint(x,y);
+            filteredSpots[i][last_col] = snr;
+            if (snr < spotThreshold) {
+                filteredSpots[i][0] = 0.0;
             }
         }
 
@@ -465,17 +510,17 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Remove spots where mask is 0.
+     * Mark spots where mask is 0.
      */
-    private Polygon spotFilterWithMask(Polygon spots, ImagePlus mask){
-        Polygon filteredSpots = new Polygon();
+    private double[][] spotFilterWithMask(double[][]  spots, ImagePlus mask){
+        double[][] filteredSpots = new double[spots.length][spots[0].length];
+        for (int i = 0; i < spots.length; i++) {
+            System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
 
-        for (int i = 0; i < spots.npoints; i++) {
-            int x = spots.xpoints[i];
-            int y = spots.ypoints[i];
-
-            if (mask.getPixel(x,y)[0] > 0){
-                filteredSpots.addPoint(x,y);
+            int x = (int)spots[i][1];
+            int y = (int)spots[i][2];
+            if (mask.getPixel(x,y)[0] == 0){
+                filteredSpots[i][0] = 0.0;
             }
         }
 
@@ -517,32 +562,31 @@ public class smFRETSpotFinder implements Command {
             sumImage.setTitle("spot_qc_image");
 
             // find all spots in tne sum image.
-            ImageProcessor sumImageProc = sumImage.getProcessor();
-            MaximumFinder mf = new MaximumFinder();
-            Polygon allSpots = mf.getMaxima(sumImageProc, spotTolerance, true);
-            log.info("initial spot number " + allSpots.npoints);
+            double[][] allSpots = getMaxima(sumImage);
+            log.info("initial spot number " + allSpots.length);
 
             // filter spots that are near the edges of either channel.
             // overlapMask because this is where the channels overlap.
             overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
-            Polygon filteredSpots = spotFilterWithMask(allSpots, overlapMask);
+            double[][] filteredSpots = spotFilterWithMask(allSpots, overlapMask);
+            log.info("after edge proximity filter " + countGoodSpots(filteredSpots));
 
             // filter spots that are too close to each other.
             ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
             proximityMask = neighborhoodMaskToProximityMask(proximityMask);
             filteredSpots = spotFilterWithMask(filteredSpots, proximityMask);
-            log.info("after proximity filter " + filteredSpots.npoints);
+            log.info("after spot proximity filter " + countGoodSpots(filteredSpots));
 
             // filter low SNR spots.
             backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotMargin);
             backgroundMask = neighborhoodMaskToBackgroundMask(backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
-            log.info("after SNR filter " + filteredSpots.npoints);
+            log.info("after SNR filter " + countGoodSpots(filteredSpots));
 
             // filter low prominence spots.
             filteredSpots = spotFilterProminence(filteredSpots, sumImage, backgroundImage);
-            log.info("after prominence filter " + filteredSpots.npoints);
+            log.info("after prominence filter " + countGoodSpots(filteredSpots));
 
             // display as overlay on sum image.
             Overlay ov = getSpotOverlay(filteredSpots, spotMargin, Color.GREEN);
@@ -561,6 +605,7 @@ public class smFRETSpotFinder implements Command {
             mapping.put("camera black", cameraBlackLevel);
             mapping.put("camera gain", cameraGain);
             mapping.put("edge margin", edgeMargin);
+            mapping.put("end slice", endSlice);
             mapping.put("image name", inputImageName);
             mapping.put("mapping file", mappingFile);
             mapping.put("masks file", masksFileName);
@@ -569,7 +614,10 @@ public class smFRETSpotFinder implements Command {
             mapping.put("spot margin", spotMargin);
             mapping.put("spot prominence", spotProminence);
             mapping.put("spot sigma", spotSigma);
+            mapping.put("spot spacing", spotSpacing);
+            mapping.put("spot threshold", spotThreshold);
             mapping.put("spot tolerance", spotTolerance);
+            mapping.put("start slice", startSlice);
 
             ObjectMapper mapper = new ObjectMapper();
             File saveFile = new File(saveRootName + "_spotf_finding.json");

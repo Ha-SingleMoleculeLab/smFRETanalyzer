@@ -21,6 +21,7 @@ import org.scijava.ui.UIService;
 
 import java.awt.*;
 import java.io.File;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -75,6 +76,7 @@ public class smFRETSpotFinder implements Command {
 
     // Member variables.
     public ImagePlus backgroundMask;
+    public java.util.List<String> columnHeaders = Arrays.asList("x", "y", "snr", "prominence"); // the first two fields should always be "x","y".
     private final boolean diagnostic_mode = true;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus overlapMask;
@@ -265,23 +267,25 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Load spot locations as a Polygon.
+     * Load spot locations as a double[][].
      */
-    public Polygon loadSpotLocations(String spotsFileName){
-        Polygon spots = new Polygon();
+    public double[][] loadSpotLocations(String spotsFileName){
         try {
             ResultsTable rt = ResultsTable.open2(spotsFileName);
+            double[][] spots = new double[rt.getCounter()][columnHeaders.size()];
+            log.info("column size " + columnHeaders.size());
 
             for (int i = 0; i < rt.getCounter(); i++) {
-                int x = (int)rt.getValue("x", i);
-                int y = (int)rt.getValue("y", i);
-                spots.addPoint(x,y);
+                for (int j = 0; j < columnHeaders.size(); j++){
+                    spots[i][j] = rt.getValue(columnHeaders.get(j), i);
+                }
             }
+            return spots;
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);
         }
-        return spots;
+        return null;
     }
 
     /**
@@ -392,10 +396,9 @@ public class smFRETSpotFinder implements Command {
                 // Only save good spots.
                 if (spots[i][0] > 0.5) {
                     rt.incrementCounter();
-                    rt.addValue("x", spots[i][1]);
-                    rt.addValue("y", spots[i][2]);
-                    rt.addValue("snr", spots[i][3]);
-                    rt.addValue("prominence", spots[i][4]);
+                    for (int j=0; j < columnHeaders.size(); j++) {
+                        rt.addValue(columnHeaders.get(j), spots[i][j+1]);
+                    }
                 }
             }
             rt.saveAs(spotsFileName);
@@ -428,7 +431,7 @@ public class smFRETSpotFinder implements Command {
             int y = (int)spots[i][2];
 
             // Calculate spot lowest prominence over pixels in circular neighborhood.
-            double spotHeight = (double)fgImage.getPixel(x,y)[0];
+            double spotHeight = fgImage.getPixel(x,y)[0];
             double lowestProminence = spotHeight;
             for (int rx = -srad; rx <= srad; rx += 1){
                 for (int ry = -srad; ry <= srad; ry += 1){

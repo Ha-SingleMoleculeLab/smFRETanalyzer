@@ -13,6 +13,7 @@ import ij.IJ;
 
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 
@@ -25,8 +26,12 @@ import java.io.File;
 import java.io.PrintWriter;
 
 
+// The single-type import of org.scijava.plugin.Menu shadows java.awt.Menu from the wildcard
+// import above, so Menu here is the SciJava annotation.
 @Plugin(type = Command.class,
-        menuPath = "Plugins>smFRET>smFRET Trace Histograms")
+        menu = {@Menu(label = "Plugins"),
+                @Menu(label = "smFRET"),
+                @Menu(label = "smFRET Trace Histograms", weight = 4.0)})
 public class smFRETTraceHistogram implements Command {
 
     @Parameter

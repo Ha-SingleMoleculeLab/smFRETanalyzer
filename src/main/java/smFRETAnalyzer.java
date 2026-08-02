@@ -16,6 +16,7 @@ import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -32,7 +33,9 @@ import java.util.Map;
 
 
 @Plugin(type = Command.class, headless = true,
-        menuPath = "Plugins>smFRET>smFRET Time Traces")
+        menu = {@Menu(label = "Plugins"),
+                @Menu(label = "smFRET"),
+                @Menu(label = "smFRET Time Traces", weight = 3.0)})
 public class smFRETAnalyzer implements Command {
 
     // Parameters.

@@ -20,13 +20,18 @@ import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
 
 
+// Menu weights put the three batch plugins in the order they are meant to be run, rather than
+// leaving them to sort alphabetically as they would with an unweighted menuPath.
 @Plugin(type = Command.class, headless = true,
-        menuPath = "Plugins>smFRET>smFRET Channel Mapping")
+        menu = {@Menu(label = "Plugins"),
+                @Menu(label = "smFRET"),
+                @Menu(label = "smFRET Channel Mapping", weight = 1.0)})
 public class smFRETChannelMapper implements Command {
 
     @Parameter

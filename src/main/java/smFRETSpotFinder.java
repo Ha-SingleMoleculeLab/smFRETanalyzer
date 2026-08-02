@@ -15,6 +15,7 @@ import ij.plugin.filter.MaximumFinder;
 import ij.process.ImageProcessor;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -27,7 +28,9 @@ import java.util.Map;
 
 
 @Plugin(type = Command.class, headless = true,
-        menuPath = "Plugins>smFRET>smFRET Spot Finder")
+        menu = {@Menu(label = "Plugins"),
+                @Menu(label = "smFRET"),
+                @Menu(label = "smFRET Spot Finder", weight = 2.0)})
 public class smFRETSpotFinder implements Command {
     @Parameter
     LogService log;

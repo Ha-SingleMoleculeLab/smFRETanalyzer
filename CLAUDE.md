@@ -4,13 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-A multipart FIJI/ImageJ plugin (Maven, `pom-scijava` parent) for analyzing two-channel single-molecule FRET (smFRET) microscopy data. It ships as three SciJava `Command` plugins that are meant to be run in sequence, each consuming the previous step's output file(s):
+A multipart FIJI/ImageJ plugin (Maven, `pom-scijava` parent) for analyzing two-channel single-molecule FRET (smFRET) microscopy data. Three SciJava `Command` plugins are meant to be run in sequence, each consuming the previous step's output file(s):
 
 1. **smFRETChannelMapper** (`smFRETChannelMapper.java`) — computes an affine mapping between the donor/target (left half of the image) and acceptor/source (right half) channels using TurboReg landmark registration on an averaged image. Outputs `<name>_mapping.json` (affine transform + expected image size) and a QC overlay TIF.
 2. **smFRETSpotFinder** (`smFRETSpotFinder.java`) — loads the mapping JSON, finds candidate spots (local maxima) in the averaged, channel-summed image, then filters them by edge proximity, inter-spot proximity, SNR, and prominence. Outputs `<name>_spotf_finding.json` (parameters + file references), `<name>_spotf_spots.csv` (surviving spot table), `<name>_spotf_qc_image.tif`, and `<name>_spotf_masks.tif` (overlap mask + background mask as a 2-frame stack).
 3. **smFRETAnalyzer** (`smFRETAnalyzer.java`) — loads the spot-finder JSON, re-derives the mapping/masks/spot list from it, estimates a per-frame background via temporal boxcar filtering (`Filters3D`), and measures per-spot donor/acceptor time traces. Outputs `<name>.h5` (metadata, spot table, target/source trace matrices) and `<name>.traces` (Taekjip Ha lab binary format).
 
-Each plugin's `run()` method derives a `saveRootName` from its primary input file path (strips the extension) and writes all outputs alongside the input using that root. See `README.md` for the full parameter/output reference exposed to end users in the ImageJ UI.
+Each of those three `run()` methods derives a `saveRootName` from its primary input file path (strips the extension) and writes all outputs alongside the input using that root. See `README.md` for the full parameter/output reference exposed to end users in the ImageJ UI.
+
+A fourth plugin sits outside that chain:
+
+4. **smFRETTraceHistogram** (`smFRETTraceHistogram.java`) — an interactive viewer for the `.h5` written by stage 3. It is the only plugin here that builds its own Swing UI rather than relying on SciJava's generated parameter dialog, and the only one that writes nothing unless the user clicks Save. It reads just `target-traces` and `source-traces` from the H5 — deliberately not `spots` or `spots-fields`, which are absent from files written before `d99e74a`. Each trace contributes **one** point (its mean over the selected frame interval), not one per frame, and the FRET value is the ratio of the averaged intensities `mean(A)/(mean(D)+mean(A))` rather than the mean of the per-frame ratios — the two differ substantially (~0.2 in the mean on the example data). The intensity threshold is an all-frames test — a trace is excluded if *any* frame in the interval falls below it, not if its average does — which makes it far stricter than it looks (on the example data any threshold ≥ 0 empties the histogram). The threshold slider's bounds come from per-frame min/max rather than from the trace averages, which is what guarantees its low end can never silently exclude a trace. `computeHistogram` deliberately takes its settings as arguments rather than reading the Swing controls, so the binning can be exercised without a display.
 
 ## Architecture notes
 

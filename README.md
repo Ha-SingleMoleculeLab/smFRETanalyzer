@@ -59,6 +59,30 @@ This plugin measures the FRET time traces for each of the spots in the FRET imag
 * <image_name>.h5 - A HDF5 format file with analysis metadata, spot locations and statistics, donor/target time traces and acceptor/source time traces.
 * <image_name>.traces - A binary file with the time traces in the Taekjip Ha lab format.
 
+### smFRETTraceHistogram
+
+This plugin plots histograms of the time traces measured by smFRETAnalyzer. Each trace contributes a single point, the average of that trace over the selected frame interval, so there is one entry per molecule rather than one per frame. Unlike the other plugins it is interactive - the histogram is recomputed as the controls are adjusted, so that the interval and the intensity threshold can be chosen by eye.
+
+#### Parameters:
+
+* Trace H5 file - The .h5 file written by smFRETAnalyzer.
+
+#### Controls:
+
+* Histogram - Which quantity to histogram: FRET efficiency, donor/target intensity, acceptor/source intensity, or total intensity. The FRET efficiency is calculated from the interval averaged intensities as mean(acceptor) / (mean(donor) + mean(acceptor)). Note that this is not the same as averaging the per frame ratios - on the example data the two differ by about 0.2 in the mean.
+* Bins - The number of histogram bins.
+* First frame / Last frame - The range of slices/frames each trace is averaged over.
+* Min - Minimum intensity, applied to whichever quantity is chosen in the adjacent drop down: total (donor + acceptor), donor/target, or acceptor/source. These are mutually exclusive, so switching rescales the single slider to the range of the newly selected quantity and clears the threshold. A trace is dropped from the histogram entirely if *any* frame in the interval falls below the threshold, so a molecule that bleaches part way through contributes nothing rather than a diluted average.
+
+FRET efficiency is plotted over a fixed range of -0.2 to 1.2 so that the noise either side of the physical range stays visible; the number of points falling outside that range is reported in the status line. The intensity histograms are auto-ranged.
+
+#### Outputs:
+
+Nothing is written unless you ask for it:
+
+* <image_name>_histogram.csv - The bin centers and counts of the displayed histogram, via 'Save CSV'.
+* <image_name>_histogram.png - The displayed plot, titled with the H5 file name so that a saved plot can be identified on its own, via 'Save PNG'.
+
 ## Dependencies ##
 
 * [TurboReg](https://imagej.net/plugins/turboreg)

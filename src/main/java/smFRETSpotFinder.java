@@ -247,8 +247,10 @@ public class smFRETSpotFinder implements Command {
      * Load an existing mapping JSON file to initialize smFRETChannelMapper.
      */
     public void loadMappingJSON(String mappingFileName){
-        smfcm.loadMappingJSON(mappingFileName);
+        // Set the log before loading, otherwise a load failure NPEs in smfcm's
+        // exception handler instead of reporting the actual problem.
         smfcm.log = log;
+        smfcm.loadMappingJSON(mappingFileName);
     }
 
     /**
@@ -468,7 +470,7 @@ public class smFRETSpotFinder implements Command {
         fgSmooth.setTitle("foreground_smooth");
 
         ImagePlus bgSmooth = backgroundImage.duplicate();
-        ImageProcessor impBg = fgSmooth.getProcessor();
+        ImageProcessor impBg = bgSmooth.getProcessor();
         impBg.blurGaussian(spotSigma);
         bgSmooth.setTitle("background_smooth");
 

@@ -233,9 +233,7 @@ public class smFRETAnalyzer implements Command {
      * int16 (Short) - 2 * (length of traces) * (number of traces) in order [time][trace number].
      */
     private void saveToTracesFile(String tracesFileName, double [][] timeTraces){
-        try {
-            //DataOutputStream tracesDos = new DataOutputStream(new FileOutputStream(saveRootName + ".traces"));
-            LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(tracesFileName));
+        try (LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(tracesFileName))) {
             tracesDos.writeInt(timeTraces[0].length);   // Length of traces.
             tracesDos.writeShort(timeTraces.length / 2); // Number of traces.
 
@@ -288,8 +286,10 @@ public class smFRETAnalyzer implements Command {
             log.info("estimating background in channels");
             java.util.List<ImagePlus> bgEstimates = backGroundEstimation(image);
 
-            ui.show(bgEstimates.get(0));
-            ui.show(bgEstimates.get(1));
+            if (!isHeadless) {
+                ui.show(bgEstimates.get(0));
+                ui.show(bgEstimates.get(1));
+            }
 
             // Measure spot time traces.
             log.info("measuring time traces");

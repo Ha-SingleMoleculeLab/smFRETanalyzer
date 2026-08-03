@@ -47,3 +47,17 @@ The build resolves ImageJ/SciJava core artifacts from Maven Central plus the `sc
 **Runtime dependency not in `pom.xml`:** the channel mapper requires the [TurboReg](https://imagej.net/plugins/turboreg) plugin (v2.0.1) to be present in the target Fiji/ImageJ installation's plugin path — it's invoked via reflection at runtime, not linked at compile time.
 
 To use the plugin, install the built jar into a Fiji/ImageJ `plugins/` directory alongside TurboReg; the four commands then appear under `Plugins > smFRET`.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on the fork `HazenBabcock/smFRETAnalyzer`, pinned as `gh`'s default repo since `origin` points at the TJHaLab upstream. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root, created lazily. See `docs/agents/domain.md`.

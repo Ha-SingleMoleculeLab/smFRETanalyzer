@@ -34,14 +34,16 @@ A fourth plugin sits outside that chain:
 
 ## Build
 
-Standard Maven build against the `pom-scijava` BOM/parent:
+Maven build against the `pom-scijava` BOM/parent, **which must run on a JDK that can still emit Java 8 bytecode**:
 
 ```
-mvn clean package
+JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64 mvn clean package
 ```
+
+`pom-scijava` sets `maven.compiler.release` to 8 (matching the Java 8 runtime Fiji bundles — `Fiji.app/java/zulu8*`), and the JDK 21 compiler rejects `--release 8` with `error: release version 8 not supported`. Plain `mvn clean package` therefore fails on a machine whose default `java` is 21: `maven-compiler-plugin` compiles in-process using the compiler of whichever JVM Maven itself is running on, so it is `JAVA_HOME`/`java` that decides, **not** the `javac` on `PATH` — a PATH `javac` of 11 does not rescue the build. `mvn -version` reports the JVM actually in use. Add `-o` to build offline once the dependencies are in `~/.m2`.
 
 The build resolves ImageJ/SciJava core artifacts from Maven Central plus the `scijava.public` repository declared in `pom.xml`. There is no test suite in this repository (no `src/test`), so `mvn test`/`mvn verify` runs no tests.
 
 **Runtime dependency not in `pom.xml`:** the channel mapper requires the [TurboReg](https://imagej.net/plugins/turboreg) plugin (v2.0.1) to be present in the target Fiji/ImageJ installation's plugin path — it's invoked via reflection at runtime, not linked at compile time.
 
-To use the plugin, install the built jar into a Fiji/ImageJ `plugins/` directory alongside TurboReg; the three commands then appear under `Plugins > smFRET`.
+To use the plugin, install the built jar into a Fiji/ImageJ `plugins/` directory alongside TurboReg; the four commands then appear under `Plugins > smFRET`.

@@ -35,5 +35,9 @@ build/
 ### VS Code ###
 .vscode/
 
+### Claude Code ###
+# Machine local permission grants. A shared .claude/settings.json can still be committed.
+.claude/settings.local.json
+
 ### Mac OS ###
 .DS_Store

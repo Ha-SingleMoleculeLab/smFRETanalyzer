@@ -20,10 +20,14 @@ import org.scijava.plugin.Plugin;
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
 import java.awt.*;
+import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.PrintWriter;
+import java.util.ArrayList;
 
 
 // The single-type import of org.scijava.plugin.Menu shadows java.awt.Menu from the wildcard
@@ -64,9 +68,8 @@ public class smFRETTraceHistogram implements Command {
     private JComboBox<String> filterCombo;
     private final double[] filterMax = new double[FILTER_NAMES.length];
     private final double[] filterMin = new double[FILTER_NAMES.length];
-    private JSlider firstFrameSlider;
+    private RangeSlider frameRangeSlider;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
-    private JSlider lastFrameSlider;
     private JSlider minValueSlider;
     private int nFrames = 0;
     private int nSpots = 0;
@@ -331,6 +334,278 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
+     * Two handle slider for choosing the frame interval to average over.
+     *
+     * Swing has no range slider. One ordinary slider per end can express the same interval, but
+     * makes the common operation - moving a window of fixed width through the movie - awkward,
+     * because both ends have to be dragged separately and kept in step. Here dragging either
+     * handle resizes the interval and dragging the bar between them slides it at constant width.
+     *
+     * Only low <= high states are reachable, so callers do not have to order the two values.
+     */
+    private static class RangeSlider extends JComponent {
+
+        private static final int BAR_HEIGHT = 6;
+        private static final int THUMB_SIZE = 13;
+
+        private static final int DRAG_NONE = 0;
+        private static final int DRAG_LOW = 1;
+        private static final int DRAG_HIGH = 2;
+        private static final int DRAG_BAR = 3;
+
+        private int dragMode = DRAG_NONE;
+        private int grabHigh;               // Interval at the start of a bar drag, so that the
+        private int grabLow;                // width is preserved exactly however far it is
+        private int grabValue;              // dragged, rather than drifting by a rounding error.
+        private int high;
+        private final ArrayList<ChangeListener> listeners = new ArrayList<>();
+        private int low;
+        private int maximum;
+        private int minimum;
+        private boolean valueIsAdjusting;
+
+        RangeSlider(int minimum, int maximum) {
+            this.minimum = minimum;
+            this.maximum = Math.max(maximum, minimum);
+            low = this.minimum;
+            high = this.maximum;
+
+            setPreferredSize(new Dimension(200, THUMB_SIZE + 8));
+            setFocusable(true);
+            setToolTipText("Drag either end to resize the interval, drag the middle to slide it");
+
+            MouseAdapter mouse = new MouseAdapter() {
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    requestFocusInWindow();
+                    onPress(e.getX());
+                }
+
+                @Override
+                public void mouseDragged(MouseEvent e) {
+                    onDrag(e.getX());
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent e) {
+                    dragMode = DRAG_NONE;
+
+                    // Fire once more on release so listeners that only act on settled values
+                    // see the final interval.
+                    if (valueIsAdjusting) {
+                        valueIsAdjusting = false;
+                        fireChange();
+                    }
+                }
+            };
+            addMouseListener(mouse);
+            addMouseMotionListener(mouse);
+
+            addKeyListener(new KeyAdapter() {
+                @Override
+                public void keyPressed(KeyEvent e) {
+                    onKey(e.getKeyCode());
+                }
+            });
+
+            addFocusListener(new FocusAdapter() {
+                @Override
+                public void focusGained(FocusEvent e) {
+                    repaint();
+                }
+
+                @Override
+                public void focusLost(FocusEvent e) {
+                    repaint();
+                }
+            });
+        }
+
+        void addChangeListener(ChangeListener listener) {
+            listeners.add(listener);
+        }
+
+        private int clamp(int value) {
+            if (value < minimum) {
+                return minimum;
+            }
+            if (value > maximum) {
+                return maximum;
+            }
+            return value;
+        }
+
+        private void fireChange() {
+            ChangeEvent event = new ChangeEvent(this);
+            for (ChangeListener listener : listeners) {
+                listener.stateChanged(event);
+            }
+        }
+
+        int getHigh() {
+            return high;
+        }
+
+        int getLow() {
+            return low;
+        }
+
+        private void onDrag(int x) {
+            if (dragMode == DRAG_NONE) {
+                return;
+            }
+            valueIsAdjusting = true;
+            int value = xToValue(x);
+
+            if (dragMode == DRAG_LOW) {
+                setValues(Math.min(value, high), high);
+            } else if (dragMode == DRAG_HIGH) {
+                setValues(low, Math.max(value, low));
+            } else {
+                slide(grabLow + (value - grabValue), grabHigh - grabLow);
+            }
+        }
+
+        private void onKey(int keyCode) {
+            int width = high - low;
+            if (keyCode == KeyEvent.VK_LEFT) {
+                slide(low - 1, width);
+            } else if (keyCode == KeyEvent.VK_RIGHT) {
+                slide(low + 1, width);
+            } else if (keyCode == KeyEvent.VK_HOME) {
+                slide(minimum, width);
+            } else if (keyCode == KeyEvent.VK_END) {
+                slide(maximum - width, width);
+            } else if (keyCode == KeyEvent.VK_UP) {
+                setValues(low, high + 1);
+            } else if (keyCode == KeyEvent.VK_DOWN) {
+                setValues(low, Math.max(high - 1, low));
+            }
+        }
+
+        private void onPress(int x) {
+            int lowX = valueToX(low);
+            int highX = valueToX(high);
+            int lowDistance = Math.abs(x - lowX);
+            int highDistance = Math.abs(x - highX);
+
+            if ((lowDistance <= THUMB_SIZE) || (highDistance <= THUMB_SIZE)) {
+
+                // Which handle was grabbed. When the interval is empty the two coincide, and the
+                // side of the handle that was clicked decides - otherwise a collapsed interval
+                // could only ever be reopened in one direction.
+                if ((lowDistance < highDistance) || ((lowDistance == highDistance) && (x <= lowX))) {
+                    dragMode = DRAG_LOW;
+                } else {
+                    dragMode = DRAG_HIGH;
+                }
+            } else if ((x > lowX) && (x < highX)) {
+                dragMode = DRAG_BAR;
+                grabValue = xToValue(x);
+                grabLow = low;
+                grabHigh = high;
+            } else {
+
+                // On the track outside the interval, bring the nearer end out to meet the click.
+                dragMode = (xToValue(x) < low) ? DRAG_LOW : DRAG_HIGH;
+            }
+            onDrag(x);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
+            super.paintComponent(g);
+
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+            int barY = (getHeight() - BAR_HEIGHT) / 2;
+            int lowX = valueToX(low);
+            int highX = valueToX(high);
+
+            g2.setColor(new Color(205, 205, 205));
+            g2.fillRoundRect(trackX(), barY, trackWidth(), BAR_HEIGHT, BAR_HEIGHT, BAR_HEIGHT);
+
+            // The selected interval, in the same blue as the histogram bars.
+            g2.setColor(new Color(70, 115, 175));
+            g2.fillRoundRect(lowX, barY, Math.max(1, highX - lowX), BAR_HEIGHT, BAR_HEIGHT, BAR_HEIGHT);
+
+            paintThumb(g2, lowX);
+            paintThumb(g2, highX);
+
+            g2.dispose();
+        }
+
+        private void paintThumb(Graphics2D g2, int x) {
+            int y = (getHeight() - THUMB_SIZE) / 2;
+            g2.setColor(Color.WHITE);
+            g2.fillOval(x - THUMB_SIZE / 2, y, THUMB_SIZE, THUMB_SIZE);
+            g2.setColor(isFocusOwner() ? new Color(40, 80, 140) : new Color(90, 90, 90));
+            g2.drawOval(x - THUMB_SIZE / 2, y, THUMB_SIZE - 1, THUMB_SIZE - 1);
+        }
+
+        /**
+         * Set the limits, keeping the interval inside them.
+         */
+        void setRange(int newMinimum, int newMaximum) {
+            minimum = newMinimum;
+            maximum = Math.max(newMaximum, newMinimum);
+            setValues(low, high);
+            repaint();
+        }
+
+        /**
+         * Set the interval, clamped to the limits and to low <= high.
+         */
+        void setValues(int newLow, int newHigh) {
+            int clampedLow = clamp(newLow);
+            int clampedHigh = Math.max(clamp(newHigh), clampedLow);
+            if ((clampedLow == low) && (clampedHigh == high)) {
+                return;
+            }
+
+            low = clampedLow;
+            high = clampedHigh;
+            repaint();
+            fireChange();
+        }
+
+        /**
+         * Move the interval to start at newLow without changing its width, stopping at the ends
+         * rather than letting the width shrink against them.
+         */
+        private void slide(int newLow, int width) {
+            int clampedLow = Math.min(Math.max(newLow, minimum), maximum - width);
+            setValues(clampedLow, clampedLow + width);
+        }
+
+        // Half a handle of padding at each end, so that the handles stay inside the component
+        // when the interval is at either limit.
+        private int trackWidth() {
+            return Math.max(1, getWidth() - THUMB_SIZE);
+        }
+
+        private int trackX() {
+            return THUMB_SIZE / 2;
+        }
+
+        private int valueToX(int value) {
+            if (maximum == minimum) {
+                return trackX();
+            }
+            return trackX() + (int) Math.round((double) (value - minimum) * trackWidth() / (maximum - minimum));
+        }
+
+        private int xToValue(int x) {
+            if (maximum == minimum) {
+                return minimum;
+            }
+            double fraction = (double) (x - trackX()) / trackWidth();
+            return clamp(minimum + (int) Math.round(fraction * (maximum - minimum)));
+        }
+    }
+
+    /**
      * A round tick spacing (1, 2, 2.5 or 5 times a power of ten) for an axis of this range. The
      * FRET range of 1.4 gives 0.2.
      */
@@ -463,7 +738,7 @@ public class smFRETTraceHistogram implements Command {
         }
         try (PrintWriter writer = new PrintWriter(chooser.getSelectedFile())) {
             writer.println("# " + result.valueLabel + " from " + h5File);
-            writer.println("# frames " + firstFrameSlider.getValue() + "-" + lastFrameSlider.getValue()
+            writer.println("# frames " + frameRangeSlider.getLow() + "-" + frameRangeSlider.getHigh()
                     + ", min " + FILTER_NAMES[filterCombo.getSelectedIndex()] + " " + minValueSlider.getValue()
                     + ", " + result.nPoints + " of " + result.nSpotsUsed + " traces in range");
             writer.println("bin_center,count");
@@ -532,10 +807,8 @@ public class smFRETTraceHistogram implements Command {
         boolean wasSuspended = suspendUpdates;
         suspendUpdates = true;
         try {
-            firstFrameSlider.setMaximum(nFrames);
-            firstFrameSlider.setValue(1);
-            lastFrameSlider.setMaximum(nFrames);
-            lastFrameSlider.setValue(nFrames);
+            frameRangeSlider.setRange(1, Math.max(1, nFrames));
+            frameRangeSlider.setValues(1, Math.max(1, nFrames));
             resetFilterSliderRange();
         } finally {
             suspendUpdates = wasSuspended;
@@ -596,25 +869,17 @@ public class smFRETTraceHistogram implements Command {
             return;
         }
 
-        // The frame sliders are independent, so keep them from crossing over.
-        if (firstFrameSlider.getValue() > lastFrameSlider.getValue()) {
-            if (firstFrameSlider.getValueIsAdjusting()) {
-                lastFrameSlider.setValue(firstFrameSlider.getValue());
-            } else {
-                firstFrameSlider.setValue(lastFrameSlider.getValue());
-            }
-        }
-
         result = computeHistogram(selectedType(),
-                firstFrameSlider.getValue(),
-                lastFrameSlider.getValue(),
+                frameRangeSlider.getLow(),
+                frameRangeSlider.getHigh(),
                 filterCombo.getSelectedIndex(),
                 minValueSlider.getValue(),
                 binsSlider.getValue());
 
-        String status = String.format("%,d of %,d traces · frames %d-%d",
+        String status = String.format("%,d of %,d traces · frames %d-%d (%,d wide)",
                 result.nSpotsUsed, nSpots,
-                firstFrameSlider.getValue(), lastFrameSlider.getValue());
+                frameRangeSlider.getLow(), frameRangeSlider.getHigh(),
+                frameRangeSlider.getHigh() - frameRangeSlider.getLow() + 1);
         if (result.nOutside > 0) {
             status += String.format(" · %,d outside range", result.nOutside);
         }
@@ -664,8 +929,7 @@ public class smFRETTraceHistogram implements Command {
         // One point per trace means far fewer points than the old per frame histogram, so the
         // default bin count is correspondingly lower.
         binsSlider = new JSlider(10, 200, 30);
-        firstFrameSlider = new JSlider(1, Math.max(1, nFrames), 1);
-        lastFrameSlider = new JSlider(1, Math.max(1, nFrames), Math.max(1, nFrames));
+        frameRangeSlider = new RangeSlider(1, Math.max(1, nFrames));
         minValueSlider = new JSlider(0, 1, 0);
 
         // The threshold applies to one intensity at a time, chosen here. Switching rescales the
@@ -684,9 +948,9 @@ public class smFRETTraceHistogram implements Command {
         JPanel controlPanel = new JPanel(new GridBagLayout());
         controlPanel.setBorder(new EmptyBorder(4, 8, 4, 8));
         addSliderRow(controlPanel, 0, new JLabel("Bins"), binsSlider, () -> Integer.toString(binsSlider.getValue()));
-        addSliderRow(controlPanel, 1, new JLabel("First frame"), firstFrameSlider, () -> Integer.toString(firstFrameSlider.getValue()));
-        addSliderRow(controlPanel, 2, new JLabel("Last frame"), lastFrameSlider, () -> Integer.toString(lastFrameSlider.getValue()));
-        addSliderRow(controlPanel, 3, filterLabelPanel, minValueSlider, () -> Integer.toString(minValueSlider.getValue()));
+        addSliderRow(controlPanel, 1, new JLabel("Frames"), frameRangeSlider,
+                () -> frameRangeSlider.getLow() + "-" + frameRangeSlider.getHigh());
+        addSliderRow(controlPanel, 2, filterLabelPanel, minValueSlider, () -> Integer.toString(minValueSlider.getValue()));
 
         // Status and save buttons.
         statusLabel = new JLabel(" ");
@@ -722,9 +986,36 @@ public class smFRETTraceHistogram implements Command {
 
     /**
      * showWindow() helper, adds one labelled slider row with a live value readout.
+     *
+     * JSlider and RangeSlider have the same addChangeListener() method but no common supertype
+     * that declares it, hence the pair of overloads over a shared layout helper.
      */
     private void addSliderRow(JPanel parent, int row, JComponent label, JSlider slider,
                               java.util.function.Supplier<String> valueText) {
+        JLabel valueLabel = addControlRow(parent, row, label, slider, valueText);
+        slider.addChangeListener(e -> {
+            valueLabel.setText(valueText.get());
+            update();
+        });
+    }
+
+    /**
+     * showWindow() helper, the range slider flavour of addSliderRow().
+     */
+    private void addSliderRow(JPanel parent, int row, JComponent label, RangeSlider slider,
+                              java.util.function.Supplier<String> valueText) {
+        JLabel valueLabel = addControlRow(parent, row, label, slider, valueText);
+        slider.addChangeListener(e -> {
+            valueLabel.setText(valueText.get());
+            update();
+        });
+    }
+
+    /**
+     * addSliderRow() helper, lays out one row and returns its value readout.
+     */
+    private JLabel addControlRow(JPanel parent, int row, JComponent label, JComponent control,
+                                 java.util.function.Supplier<String> valueText) {
         GridBagConstraints c = new GridBagConstraints();
         c.gridy = row;
         c.insets = new Insets(1, 2, 1, 6);
@@ -736,19 +1027,18 @@ public class smFRETTraceHistogram implements Command {
         c.gridx = 1;
         c.fill = GridBagConstraints.HORIZONTAL;
         c.weightx = 1.0;
-        parent.add(slider, c);
+        parent.add(control, c);
 
         c.gridx = 2;
         c.fill = GridBagConstraints.NONE;
         c.weightx = 0.0;
         JLabel valueLabel = new JLabel(valueText.get());
-        valueLabel.setPreferredSize(new Dimension(58, valueLabel.getPreferredSize().height));
+
+        // Wide enough for the frame row's "1234-5678", the longest readout of the three.
+        valueLabel.setPreferredSize(new Dimension(78, valueLabel.getPreferredSize().height));
         parent.add(valueLabel, c);
 
-        slider.addChangeListener(e -> {
-            valueLabel.setText(valueText.get());
-            update();
-        });
+        return valueLabel;
     }
 
     /**

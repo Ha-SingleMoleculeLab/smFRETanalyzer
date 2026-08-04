@@ -38,6 +38,7 @@ This plugin is used to find the spots in the FRET image stack.
 * SpotSpacing - The minimum allowd distance between spots (pixels).
 * SpotMargin - The radius to mask as foreground around a spot (pixels).
 * EdgeMargin - The margin around the edge of the overlap region of the two channels to ignore (pixels).
+* BackgroundKappa - How far above the background estimate a pixel may sit, in robust standard deviations, before it is treated as spot light and excluded. Lower values clip harder, leaving the background too low and every trace too high; higher ones keep the contamination and drive traces negative. The default of 2.5 is where a photobleached molecule's trace sits at zero on the example data.
 
 #### Outputs:
 

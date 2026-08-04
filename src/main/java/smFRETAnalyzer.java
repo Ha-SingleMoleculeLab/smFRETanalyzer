@@ -78,8 +78,6 @@ public class smFRETAnalyzer implements Command {
         ImageStack sourceBg = new ImageStack();
 
         IJ.showStatus("Background estimation..");
-        ImagePlus targetImgEst = null;
-        ImagePlus sourceImgEst = null;
         int stepSize = Math.max(imageZFlt.size()/100, 1);
         for (int i = 1; i <= imageZFlt.size(); i++){
             if (i%stepSize == 0){
@@ -96,9 +94,11 @@ public class smFRETAnalyzer implements Command {
             ImagePlus targetImg = splitImages.get(0);
             ImagePlus sourceImg = splitImages.get(1);
 
-            // Estimate background in source and target.
-            targetImgEst = smfsf.backgroundEstimate(targetImg, targetImgEst);
-            sourceImgEst = smfsf.backgroundEstimate(sourceImg, sourceImgEst);
+            // Estimate background in source and target. Each frame is estimated from scratch;
+            // the estimator settles in a fixed few rounds and has nothing to carry over from
+            // the previous frame the way the old inpainting fill did.
+            ImagePlus targetImgEst = smfsf.backgroundEstimate(targetImg);
+            ImagePlus sourceImgEst = smfsf.backgroundEstimate(sourceImg);
 
             // Add to stack.
             targetBg.addSlice(targetImgEst.getProcessor());
@@ -277,6 +277,12 @@ public class smFRETAnalyzer implements Command {
             smfsf.log = log;
             smfsf.spotMargin = (Integer) mapping.get("spot margin");
             smfsf.edgeMargin = (Integer) mapping.get("edge margin");
+            // Absent from spot finder JSON written before background estimation changed, in
+            // which case the estimator's own default stands.
+            Object kappa = mapping.get("background kappa");
+            if (kappa != null) {
+                smfsf.backgroundKappa = ((Number) kappa).doubleValue();
+            }
             smfsf.loadMappingJSON(mappingFileName);
             smfsf.loadMasks(masksFileName);
             double[][] spots = smfsf.loadSpotLocations(spotsFileName);

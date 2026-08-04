@@ -80,7 +80,7 @@ public class smFRETSpotFinder implements Command {
     Integer edgeMargin = 5;
 
     @Parameter (description = "background clipping threshold (robust sigmas above the estimate)", min = "0.1")
-    Double backgroundKappa = 2.5;
+    Double backgroundKappa = 1.8;
 
     // Rounds of clipping in backgroundEstimate. It settles in three or four -
     // each round removes the brightest leftovers and the ones after that find
@@ -114,11 +114,18 @@ public class smFRETSpotFinder implements Command {
      * The clipping is deliberately one-sided. Contamination only ever makes a pixel brighter,
      * so rejecting symmetrically would throw away good dark pixels and pull the estimate down.
      *
-     * The default kappa of 2.5 was measured rather than chosen: on a long movie a photobleached
-     * molecule must sit at zero afterwards, and 2.5 is where it does, to within half a
-     * photoelectron in both channels. Lower values clip too hard, leave the background too low
-     * and every trace too high; higher ones keep the contamination and drive traces negative,
-     * which is what the previous inpainting estimator did to two thirds of them.
+     * The default kappa of 1.8 was measured rather than chosen: on a long movie a photobleached
+     * molecule must sit at zero afterwards, and 1.8 is where it does. Lower values clip too
+     * hard, leave the background too low and every trace too high; higher ones keep the
+     * contamination and drive traces negative, which is what the previous inpainting estimator
+     * did to two thirds of them.
+     *
+     * It is worth re-measuring per dataset, which is why it is a parameter. How much spot light
+     * reaches the trusted pixels depends on the PSF and on how crowded the field is, and the
+     * right clip follows: the same movie wanted 2.5 when its spot finding had produced 488 spots
+     * and 1.8 at 553. Note the circularity there - spotFilterSNR uses this estimator, so a
+     * better background admits more spots, which crowds the field, which wants a tighter clip.
+     * One pass either way is small; it is not worth iterating to convergence.
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImageProcessor original = image.getProcessor();

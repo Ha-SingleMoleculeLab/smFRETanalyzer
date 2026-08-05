@@ -79,13 +79,41 @@ public class smFRETSpotFinder implements Command {
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
 
-    @Parameter (description = "background clipping threshold (robust sigmas above the estimate)", min = "0.1")
-    Double backgroundKappa = 1.8;
+    @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
+    Double backgroundKappa = 0.0;
 
     // Rounds of clipping in backgroundEstimate. It settles in three or four -
     // each round removes the brightest leftovers and the ones after that find
     // nothing new to remove.
     private static final int backgroundClipRounds = 4;
+
+    // kappa = backgroundKappaIntercept + backgroundKappaSlope * spotSigma, when
+    // backgroundKappa is left at zero. Measured by sweeping radius, kappa and
+    // smoothing against a known background over simulated aberrated Airy PSFs
+    // from sigma 1 to 3: the best kappa runs 1.25, 1.00, 1.00, 0.80, 0.60 and
+    // fits this line to an rms of 0.05.
+    //
+    // It *falls* with spot size, which is not the obvious direction. A wider
+    // PSF spreads the same wing photons over more pixels, so the contamination
+    // is a smaller excursion above the background in each one, and catching it
+    // needs a tighter clip rather than a looser one.
+    private static final double backgroundKappaIntercept = 1.5;
+    private static final double backgroundKappaSlope = -0.3;
+
+    // Smallest derived kappa. The fit reaches 0.6 at sigma 3 and would keep
+    // going; below about half a robust sigma the clip starts removing ordinary
+    // background noise along with the spot light.
+    private static final double backgroundKappaFloor = 0.5;
+
+    // Smoothing scale for the background estimate, in pixels. A constant, and
+    // measured to be one: the best value sat at 12 to 16 pixels at every spot
+    // size tried, with no trend against it (the fit is 14.4 - 0.00 * sigma).
+    // It is a property of how fast the illumination varies, which is a fact
+    // about the microscope rather than about the spots.
+    //
+    // This used to be 2 * spotMargin, which with the default margin gave 8 and
+    // cost 40 to 60% more error than 14 at every sigma above 1.
+    private static final double backgroundSmoothing = 14.0;
 
     // Member variables.
     public ImagePlus backgroundMask;
@@ -114,18 +142,18 @@ public class smFRETSpotFinder implements Command {
      * The clipping is deliberately one-sided. Contamination only ever makes a pixel brighter,
      * so rejecting symmetrically would throw away good dark pixels and pull the estimate down.
      *
-     * The default kappa of 1.8 was measured rather than chosen: on a long movie a photobleached
-     * molecule must sit at zero afterwards, and 1.8 is where it does. Lower values clip too
-     * hard, leave the background too low and every trace too high; higher ones keep the
-     * contamination and drive traces negative, which is what the previous inpainting estimator
-     * did to two thirds of them.
+     * Neither the clipping threshold nor the smoothing scale is asked for. The threshold comes
+     * from spotSigma - see clippingThreshold - and the smoothing is a constant. Both were swept
+     * against a known background over simulated PSFs from sigma 1 to 3, and what came out is
+     * that only one of the three settings genuinely follows the spot size:
      *
-     * It is worth re-measuring per dataset, which is why it is a parameter. How much spot light
-     * reaches the trusted pixels depends on the PSF and on how crowded the field is, and the
-     * right clip follows: the same movie wanted 2.5 when its spot finding had produced 488 spots
-     * and 1.8 at 553. Note the circularity there - spotFilterSNR uses this estimator, so a
-     * better background admits more spots, which crowds the field, which wants a tighter clip.
-     * One pass either way is small; it is not worth iterating to convergence.
+     *   - the masking radius hardly matters. Anything from 2 to 6 pixels costs at most 11% more
+     *     error at any sigma, and 4 is within 2% everywhere. That is this estimator working as
+     *     intended: once the clip finds the contaminated pixels itself, there is little left for
+     *     the mask to do, so spotMargin no longer needs to be chosen with care;
+     *   - the threshold is sharp, and one grid step away costs 15 to 40%. It is worth deriving;
+     *   - the smoothing scale showed no trend against sigma at all. It is set by how fast the
+     *     illumination varies, not by the spots.
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImageProcessor original = image.getProcessor();
@@ -134,7 +162,8 @@ public class smFRETSpotFinder implements Command {
 
         boolean[] keep = trustedPixels(pixels.getWidth(), pixels.getHeight());
         float[] scratch = new float[values.length];
-        double smoothing = 2.0 * (double) spotMargin;
+        double smoothing = backgroundSmoothing;
+        double kappa = clippingThreshold();
 
         FloatProcessor estimate = maskedSmooth(pixels, keep, smoothing, scratch);
         for (int round = 0; round < backgroundClipRounds; round++) {
@@ -148,7 +177,7 @@ public class smFRETSpotFinder implements Command {
             boolean changed = false;
             boolean any = false;
             for (int i = 0; i < keep.length; i++) {
-                fresh[i] = keep[i] && (values[i] - level[i]) < backgroundKappa * spread;
+                fresh[i] = keep[i] && (values[i] - level[i]) < kappa * spread;
                 changed |= (fresh[i] != keep[i]);
                 any |= fresh[i];
             }
@@ -162,6 +191,30 @@ public class smFRETSpotFinder implements Command {
 
         ImagePlus backgroundImage = new ImagePlus("background_image", matchType(estimate, original));
         return backgroundImage;
+    }
+
+    /**
+     * How far above the estimate a pixel may sit before it is called spot light.
+     *
+     * Derived from spotSigma unless backgroundKappa says otherwise, because it is not an
+     * independent property of the experiment - it is set by how much of a spot's light lands
+     * in the pixels the estimator is trusting, and that follows from the spot's size.
+     *
+     * Setting backgroundKappa to anything above zero overrides this. That escape hatch is
+     * there because the relationship was measured on simulated data with a smooth Gaussian
+     * illumination profile, and the one real movie it has been checked against wanted a looser
+     * clip than the line predicts - 1.8 against 0.9. Two things could explain that and they
+     * have not been separated: that movie is analysed with a spotsigma of 2.0 while its PSF
+     * actually fits at 1.36, so the input to the formula is wrong there; and a structured
+     * illumination profile has real background variation that hard clipping would eat.
+     */
+    public double clippingThreshold() {
+        if (backgroundKappa > 0.0) {
+            return backgroundKappa;
+        }
+        return Math.max(
+            backgroundKappaFloor,
+            backgroundKappaIntercept + backgroundKappaSlope * spotSigma);
     }
 
     /**
@@ -717,7 +770,7 @@ public class smFRETSpotFinder implements Command {
             Map<String, Object> mapping = new HashMap<>();
             mapping.put("camera black", cameraBlackLevel);
             mapping.put("camera gain", cameraGain);
-            mapping.put("background kappa", backgroundKappa);
+            mapping.put("background kappa", clippingThreshold());
             mapping.put("edge margin", edgeMargin);
             mapping.put("end slice", endSlice);
             mapping.put("image name", inputImageName);

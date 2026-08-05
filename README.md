@@ -36,9 +36,9 @@ This plugin is used to find the spots in the FRET image stack.
 * CameraBlackLevel - The zero offset of the camera.
 * CameraGain - The camera gain in units of e-/ADU, this converts camera read values to photo-electrons.
 * SpotSpacing - The minimum allowd distance between spots (pixels).
-* SpotMargin - The radius to mask as foreground around a spot (pixels).
+* SpotMargin - The radius to mask as foreground around a spot (pixels). The background estimator is insensitive to this - anything from 2 to 6 costs at most 11% more error - because it finds contaminated pixels by clipping rather than by trusting the mask. It still sets which spots are close enough to interfere, so it is not free, but it no longer needs choosing with care.
 * EdgeMargin - The margin around the edge of the overlap region of the two channels to ignore (pixels).
-* BackgroundKappa - How far above the background estimate a pixel may sit, in robust standard deviations, before it is treated as spot light and excluded. Lower values clip harder, leaving the background too low and every trace too high; higher ones keep the contamination and drive traces negative. The default of 1.8 is where a photobleached molecule's trace sits at zero on the example data. It is worth re-measuring per dataset - how much spot light reaches the trusted pixels depends on the PSF and on how crowded the field is.
+* BackgroundKappa - How far above the background estimate a pixel may sit, in robust standard deviations, before it is treated as spot light and excluded. **Leave at 0 to derive it from SpotSigma**, as `1.5 - 0.3 * SpotSigma`, which is what a sweep against a known background over simulated PSFs from sigma 1 to 3 gives. It falls with spot size because a wider PSF spreads the same wing photons over more pixels, making the contamination a smaller excursion in each one. Set it explicitly to override; one real movie wanted a looser clip than the formula predicts, so the escape hatch is there on purpose.
 
 #### Outputs:
 

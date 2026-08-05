@@ -125,7 +125,7 @@ public class smFRETChannelMapper implements Command {
      * type's limits - because these values are compared against, and written into, files produced
      * before any of this was imglib2.
      */
-    private static ImageProcessor toProcessor(RandomAccessibleInterval<FloatType> image, int bitDepth) {
+    static ImageProcessor toProcessor(RandomAccessibleInterval<FloatType> image, int bitDepth) {
         int width = (int) image.dimension(0);
         int height = (int) image.dimension(1);
 

@@ -16,6 +16,9 @@ import ij.process.ImageProcessor;
 import ij.process.ShortProcessor;
 
 import net.imglib2.RandomAccess;
+import net.imglib2.RandomAccessible;
+import net.imglib2.algorithm.gauss3.Gauss3;
+import net.imglib2.exception.IncompatibleTypeException;
 import net.imglib2.RandomAccessibleInterval;
 import net.imglib2.img.array.ArrayImg;
 import net.imglib2.img.array.ArrayImgs;
@@ -222,6 +225,27 @@ public class smFRETSpotFinder implements Command {
      * Sharing the pixel array lets those two run in place while everything else is imglib2, with
      * no conversion between them.
      */
+    /**
+     * Gaussian smoothing, imglib2's.
+     *
+     * This was ImageJ1's GaussianBlur. The two do not agree exactly - measured at 0.04 ADU at the
+     * spot scale and 0.8 ADU, 3.9%, at the sigma 14 background scale, where ImageJ1 downscales its
+     * kernel - so numbers derived under the old one shifted slightly when this changed.
+     *
+     * The out of bounds strategy is the caller's, because it is not the same question everywhere:
+     * a normalized convolution wants zero outside, so that absent pixels carry no weight in either
+     * the numerator or the denominator, while plain smoothing wants mirroring, so that the edge is
+     * not dragged toward zero.
+     */
+    static void gauss(double sigma, RandomAccessible<FloatType> source, RandomAccessibleInterval<FloatType> target) {
+        try {
+            Gauss3.gauss(sigma, source, target);
+        } catch (IncompatibleTypeException e) {
+            // Both sides are FloatType, so this cannot happen.
+            throw new smFRETAnalysisException("Error: gaussian smoothing failed", e);
+        }
+    }
+
     static final class Shared {
         final int height;
         final ArrayImg<FloatType, FloatArray> img;
@@ -299,16 +323,20 @@ public class smFRETSpotFinder implements Command {
             }
         }
 
-        // The one ImageJ1 step. See Shared for why it is not Gauss3.
-        weighted.processor.blurGaussian(sigma);
-        total.processor.blurGaussian(sigma);
+        // Zero outside, which is what makes this a normalized convolution rather than a smoothing:
+        // a pixel off the edge contributes nothing to the weighted sum and nothing to the weight,
+        // so the ratio stays the mean of the kept pixels that actually exist.
+        Shared weightedSmooth = new Shared(image.width, image.height);
+        Shared totalSmooth = new Shared(image.width, image.height);
+        gauss(sigma, Views.extendZero(weighted.img), weightedSmooth.img);
+        gauss(sigma, Views.extendZero(total.img), totalSmooth.img);
 
         // Only reached by a pixel with no kept neighbour anywhere in the kernel, which needs a
         // masked patch several times the smoothing scale across. It is a floor, not a fill.
         final float floor = (float) subsetMedian(image.pixels, keep, scratch);
 
         Shared smoothed = new Shared(image.width, image.height);
-        LoopBuilder.setImages(smoothed.img, weighted.img, total.img)
+        LoopBuilder.setImages(smoothed.img, weightedSmooth.img, totalSmooth.img)
                 .forEachPixel((out, sum, count) ->
                         out.set((count.get() > 1.0e-6f) ? (sum.get() / count.get()) : floor));
         return smoothed;
@@ -663,12 +691,14 @@ public class smFRETSpotFinder implements Command {
         double[][] filteredSpots = new double[spots.length][spots[0].length+1];
         int last_col = filteredSpots[0].length-1;
 
-        Shared fgSmooth = foreground(sumImage, backgroundImage);
-        fgSmooth.processor.blurGaussian(spotSigma);
+        Shared foreground = foreground(sumImage, backgroundImage);
+        Shared fgSmooth = new Shared(foreground.width, foreground.height);
+        gauss(spotSigma, Views.extendMirrorSingle(foreground.img), fgSmooth.img);
 
-        Shared bgSmooth = new Shared(
+        Shared background = new Shared(
                 (FloatProcessor) backgroundImage.getProcessor().convertToFloatProcessor().duplicate());
-        bgSmooth.processor.blurGaussian(spotSigma);
+        Shared bgSmooth = new Shared(background.width, background.height);
+        gauss(spotSigma, Views.extendMirrorSingle(background.img), bgSmooth.img);
 
         // In order to calculate the SNR integrated over the spot we need the integrated magnitude
         // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when

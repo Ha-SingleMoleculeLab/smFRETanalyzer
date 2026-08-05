@@ -10,8 +10,16 @@ import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
 import ij.io.FileSaver;
-import ij.plugin.Filters3D;
 import ij.process.FloatProcessor;
+import net.imglib2.RandomAccessible;
+import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.img.Img;
+import net.imglib2.img.array.ArrayImgs;
+import net.imglib2.img.display.imagej.ImageJFunctions;
+import net.imglib2.loops.LoopBuilder;
+import net.imglib2.type.numeric.real.DoubleType;
+import net.imglib2.type.numeric.real.FloatType;
+import net.imglib2.view.Views;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
 import org.scijava.command.Command;
@@ -63,15 +71,20 @@ public class smFRETAnalyzer implements Command {
 
     /**
      * Stack background estimation.
-     * This is just a temporal boxcar filter.
+     *
+     * The temporal average is now what the comment here always claimed it was. It used to be
+     * Filters3D.filter(MEAN, 1, 1, N), whose x and y radius of 1 meant it averaged spatially as
+     * well - measurement put its neighbourhood somewhere between a 3x3xN box and a pure temporal
+     * window, matching neither.
+     *
+     * The spatial part is gone, and that was checked rather than assumed: putting a 3x3 average
+     * back moved the post-bleach donor level from -58 to -62, i.e. slightly further from the zero
+     * it should sit at. It is not doing useful work under a background estimator that goes on to
+     * smooth each frame at sigma 14.
      */
     public java.util.List<ImagePlus> backGroundEstimation(ImagePlus image) {
 
-        // Mean filter on z axis.
-        // FIXME: Use 0.5 for x/y radius?
-        // FIXME: Not sure how edge pixels are handled. Could be an issue if there is a
-        //        a large delta w/ time at the beginning/end of the movie.
-        ImageStack imageZFlt = Filters3D.filter(image.getStack(), Filters3D.MEAN, 1, 1, backgroundAverageNFrames);
+        ImageStack imageZFlt = temporalMean(image.getStack(), backgroundAverageNFrames);
 
         // Split into two separate stacks, one for each channel.
         ImageStack targetBg = new ImageStack();
@@ -183,6 +196,54 @@ public class smFRETAnalyzer implements Command {
     }
 
     /**
+     * Mean of each pixel over a window of +/- halfWidth frames.
+     *
+     * The window shrinks at the ends of the movie rather than being filled with invented frames,
+     * which is the other FIXME this replaced: an out of bounds strategy would either repeat the
+     * first frame, weighting it several times over, or mirror the movie back on itself. Averaging
+     * only the frames that exist does neither, at the cost of a noisier estimate in the first and
+     * last halfWidth frames - which is honest, since there is less data there.
+     *
+     * Carried as a running sum, so the cost is one pass over the movie rather than one pass per
+     * frame. Accumulated in double: a float sum drifts over the thousands of add-and-subtract
+     * rounds a long movie needs.
+     */
+    private ImageStack temporalMean(ImageStack stack, int halfWidth) {
+        int width = stack.getWidth();
+        int height = stack.getHeight();
+        int depth = stack.size();
+
+        Img<FloatType> movie = ImageJFunctions.convertFloat(new ImagePlus("movie", stack));
+        Img<DoubleType> sum = ArrayImgs.doubles(width, height);
+        ImageStack averaged = new ImageStack(width, height);
+
+        int low = 0;
+        int high = -1;
+        for (int z = 0; z < depth; z++) {
+            int wantLow = Math.max(0, z - halfWidth);
+            int wantHigh = Math.min(depth - 1, z + halfWidth);
+
+            while (high < wantHigh) {
+                high++;
+                RandomAccessibleInterval<FloatType> frame = Views.hyperSlice(movie, 2, high);
+                LoopBuilder.setImages(sum, frame).forEachPixel((s, f) -> s.set(s.get() + f.get()));
+            }
+            while (low < wantLow) {
+                RandomAccessibleInterval<FloatType> frame = Views.hyperSlice(movie, 2, low);
+                LoopBuilder.setImages(sum, frame).forEachPixel((s, f) -> s.set(s.get() - f.get()));
+                low++;
+            }
+
+            final double n = wantHigh - wantLow + 1;
+            Img<FloatType> mean = ArrayImgs.floats(width, height);
+            LoopBuilder.setImages(mean, sum).forEachPixel((m, s) -> m.set((float) (s.get() / n)));
+
+            averaged.addSlice(smFRETChannelMapper.toProcessor(mean, stack.getBitDepth()));
+        }
+        return averaged;
+    }
+
+    /**
      * A float copy of an image, smoothed at the spot scale.
      *
      * The blur is ImageJ1's, deliberately: Gauss3 differs from it by enough to move these traces,
@@ -195,10 +256,11 @@ public class smFRETAnalyzer implements Command {
     }
 
     private static smFRETSpotFinder.Shared smoothed(ImageProcessor image, double sigma) {
-        smFRETSpotFinder.Shared copy = new smFRETSpotFinder.Shared(
+        smFRETSpotFinder.Shared source = new smFRETSpotFinder.Shared(
                 (FloatProcessor) image.convertToFloatProcessor().duplicate());
-        copy.processor.blurGaussian(sigma);
-        return copy;
+        smFRETSpotFinder.Shared blurred = new smFRETSpotFinder.Shared(source.width, source.height);
+        smFRETSpotFinder.gauss(sigma, Views.extendMirrorSingle(source.img), blurred.img);
+        return blurred;
     }
 
     /**

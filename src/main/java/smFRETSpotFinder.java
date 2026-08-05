@@ -10,11 +10,20 @@ import ij.gui.Roi;
 import ij.io.FileSaver;
 import ij.measure.ResultsTable;
 import ij.plugin.Concatenator;
-import ij.plugin.ImageCalculator;
 import ij.plugin.filter.MaximumFinder;
 import ij.process.FloatProcessor;
 import ij.process.ImageProcessor;
 import ij.process.ShortProcessor;
+
+import net.imglib2.RandomAccess;
+import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.img.array.ArrayImg;
+import net.imglib2.img.array.ArrayImgs;
+import net.imglib2.img.basictypeaccess.array.FloatArray;
+import net.imglib2.img.display.imagej.ImageJFunctions;
+import net.imglib2.loops.LoopBuilder;
+import net.imglib2.type.numeric.real.FloatType;
+import net.imglib2.view.Views;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Menu;
@@ -164,17 +173,20 @@ public class smFRETSpotFinder implements Command {
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
         ImageProcessor original = image.getProcessor();
-        FloatProcessor pixels = original.convertToFloatProcessor();
-        float[] values = (float[]) pixels.getPixels();
 
-        boolean[] keep = trustedPixels(pixels.getWidth(), pixels.getHeight());
+        // duplicate, because convertToFloatProcessor hands back the same object when the input is
+        // already float, and Shared would then be aliasing the caller's pixels.
+        Shared source = new Shared((FloatProcessor) original.convertToFloatProcessor().duplicate());
+        float[] values = source.pixels;
+
+        boolean[] keep = trustedPixels(source.width, source.height);
         float[] scratch = new float[values.length];
         double smoothing = backgroundSmoothing;
         double kappa = clippingThreshold();
 
-        FloatProcessor estimate = maskedSmooth(pixels, keep, smoothing, scratch);
+        Shared estimate = maskedSmooth(source, keep, smoothing, scratch);
         for (int round = 0; round < backgroundClipRounds; round++) {
-            float[] level = (float[]) estimate.getPixels();
+            float[] level = estimate.pixels;
             double spread = robustSpread(values, level, keep, scratch);
             if (spread <= 0.0) {
                 break;
@@ -193,11 +205,41 @@ public class smFRETSpotFinder implements Command {
             }
 
             keep = fresh;
-            estimate = maskedSmooth(pixels, keep, smoothing, scratch);
+            estimate = maskedSmooth(source, keep, smoothing, scratch);
         }
 
-        ImagePlus backgroundImage = new ImagePlus("background_image", matchType(estimate, original));
+        ImagePlus backgroundImage = new ImagePlus("background_image", matchType(estimate.processor, original));
         return backgroundImage;
+    }
+
+    /**
+     * An imglib2 image and an ImageJ1 processor over one array of pixels.
+     *
+     * Two things in this class have to stay ImageJ1, because no imglib2 equivalent produces the
+     * same numbers: GaussianBlur, which differs from Gauss3 by 0.04 ADU at the spot scale and
+     * 0.8 ADU - 3.9% - at the background scale, where the kernel is downscaled; and the ROI
+     * rasterizers, where fillOval covers 69 pixels at radius 4 against 49 for the analytic disc.
+     * Sharing the pixel array lets those two run in place while everything else is imglib2, with
+     * no conversion between them.
+     */
+    private static final class Shared {
+        final int height;
+        final ArrayImg<FloatType, FloatArray> img;
+        final float[] pixels;
+        final FloatProcessor processor;
+        final int width;
+
+        Shared(int width, int height) {
+            this(new FloatProcessor(width, height));
+        }
+
+        Shared(FloatProcessor source) {
+            width = source.getWidth();
+            height = source.getHeight();
+            pixels = (float[]) source.getPixels();
+            img = ArrayImgs.floats(pixels, width, height);
+            processor = source;
+        }
     }
 
     /**
@@ -228,15 +270,13 @@ public class smFRETSpotFinder implements Command {
      * Pixels the background estimate can be built from: inside the overlap and off a spot.
      */
     private boolean[] trustedPixels(int width, int height) {
-        ImageProcessor overlap = overlapMask.getProcessor();
-        ImageProcessor background = backgroundMask.getProcessor();
+        RandomAccessibleInterval<FloatType> overlap = ImageJFunctions.convertFloat(overlapMask);
+        RandomAccessibleInterval<FloatType> background = ImageJFunctions.convertFloat(backgroundMask);
 
         boolean[] keep = new boolean[width * height];
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                keep[y * width + x] = (overlap.get(x, y) > 0) && (background.get(x, y) > 0);
-            }
-        }
+        int[] index = {0};
+        LoopBuilder.setImages(Views.flatIterable(overlap), Views.flatIterable(background))
+                .forEachPixel((o, b) -> keep[index[0]++] = (o.get() > 0.0f) && (b.get() > 0.0f));
         return keep;
     }
 
@@ -248,33 +288,29 @@ public class smFRETSpotFinder implements Command {
      * by distance, whether or not it was kept itself. That fills the spots and the edges in
      * one pass, which is what the two separate inpainting passes used to do.
      */
-    private FloatProcessor maskedSmooth(FloatProcessor image, boolean[] keep, double sigma, float[] scratch) {
-        int width = image.getWidth();
-        int height = image.getHeight();
-        float[] source = (float[]) image.getPixels();
+    private Shared maskedSmooth(Shared image, boolean[] keep, double sigma, float[] scratch) {
+        Shared weighted = new Shared(image.width, image.height);
+        Shared total = new Shared(image.width, image.height);
 
-        FloatProcessor weighted = new FloatProcessor(width, height);
-        FloatProcessor total = new FloatProcessor(width, height);
-        float[] sums = (float[]) weighted.getPixels();
-        float[] counts = (float[]) total.getPixels();
-        for (int i = 0; i < source.length; i++) {
+        for (int i = 0; i < image.pixels.length; i++) {
             if (keep[i]) {
-                sums[i] = source[i];
-                counts[i] = 1.0f;
+                weighted.pixels[i] = image.pixels[i];
+                total.pixels[i] = 1.0f;
             }
         }
-        weighted.blurGaussian(sigma);
-        total.blurGaussian(sigma);
+
+        // The one ImageJ1 step. See Shared for why it is not Gauss3.
+        weighted.processor.blurGaussian(sigma);
+        total.processor.blurGaussian(sigma);
 
         // Only reached by a pixel with no kept neighbour anywhere in the kernel, which needs a
         // masked patch several times the smoothing scale across. It is a floor, not a fill.
-        float floor = (float) subsetMedian(source, keep, scratch);
+        final float floor = (float) subsetMedian(image.pixels, keep, scratch);
 
-        FloatProcessor smoothed = new FloatProcessor(width, height);
-        float[] result = (float[]) smoothed.getPixels();
-        for (int i = 0; i < result.length; i++) {
-            result[i] = (counts[i] > 1.0e-6f) ? (sums[i] / counts[i]) : floor;
-        }
+        Shared smoothed = new Shared(image.width, image.height);
+        LoopBuilder.setImages(smoothed.img, weighted.img, total.img)
+                .forEachPixel((out, sum, count) ->
+                        out.set((count.get() > 1.0e-6f) ? (sum.get() / count.get()) : floor));
         return smoothed;
     }
 
@@ -377,17 +413,17 @@ public class smFRETSpotFinder implements Command {
         ip.fillRect(hw + edgeMargin, edgeMargin, hw - 2*edgeMargin, overlapMask.getHeight() - 2*edgeMargin);
         overlapMask.updateAndDraw();
 
-        // Transform and overlap allowed regions.
+        // Transform and overlap allowed regions. The two halves are added and thresholded, so a
+        // pixel survives only where both channels contributed their full 100.
         java.util.List<ImagePlus> overlapImages = smfcm.splitImagePlus(overlapMask, true);
-        ImagePlus overlapSumImage = ImageCalculator.run(overlapImages.get(0), overlapImages.get(1), "add create");
+        RandomAccessibleInterval<FloatType> targetHalf = ImageJFunctions.convertFloat(overlapImages.get(0));
+        RandomAccessibleInterval<FloatType> sourceHalf = ImageJFunctions.convertFloat(overlapImages.get(1));
 
-        // Threshold to binary.
-        ImageProcessor imp = overlapSumImage.getProcessor();
-        imp.threshold(190);
-        imp.multiply(1.0/255.0);
-        overlapSumImage.updateAndDraw();
+        Shared overlapSum = new Shared((int) targetHalf.dimension(0), (int) targetHalf.dimension(1));
+        LoopBuilder.setImages(overlapSum.img, targetHalf, sourceHalf)
+                .forEachPixel((out, a, b) -> out.set(((a.get() + b.get()) > 190.0f) ? 1.0f : 0.0f));
 
-        return overlapSumImage;
+        return new ImagePlus("overlap_mask", overlapSum.processor.convertToShort(false));
     }
 
     /**
@@ -396,21 +432,27 @@ public class smFRETSpotFinder implements Command {
      * Spots on the pixels where this image is > 1 are filtered out.
      */
     private ImagePlus createSpotsNeighborhoodMask(double[][] spots, int imageWidth, int imageHeight, int radius){
-        ImagePlus neighborhoodMask = IJ.createImage("neighborhood_mask", "16-bit black", imageWidth, imageHeight, 1);
+        Shared neighborhoodMask = new Shared(imageWidth, imageHeight);
 
+        // One spot at a time into a scratch image, then accumulated - the count of overlapping
+        // neighbourhoods is what the two readers of this mask key off, so they cannot simply be
+        // drawn on top of each other. The drawing is ImageJ1 because its oval rasterization is
+        // not the analytic disc and the mask footprint has to stay what it was; see Shared.
+        Shared spot = new Shared(imageWidth, imageHeight);
         for (int i = 0; i < spots.length; i++) {
             int x = (int)spots[i][1];
             int y = (int)spots[i][2];
-            ImagePlus temp = IJ.createImage("temp", "16-bit black", imageWidth, imageHeight, 1);
-            ImageProcessor ip = temp.getProcessor();
-            ip.setColor(1);
-            ip.setLineWidth(0);
-            ip.fillOval(x-radius, y-radius, 2*radius+1, 2*radius+1);
-            temp.updateAndDraw();
-            ImageCalculator.run(neighborhoodMask, temp, "add");
+
+            Arrays.fill(spot.pixels, 0.0f);
+            spot.processor.setColor(1);
+            spot.processor.setLineWidth(0);
+            spot.processor.fillOval(x-radius, y-radius, 2*radius+1, 2*radius+1);
+
+            LoopBuilder.setImages(neighborhoodMask.img, spot.img)
+                    .forEachPixel((total, one) -> total.set(total.get() + one.get()));
         }
 
-        return neighborhoodMask;
+        return new ImagePlus("neighborhood_mask", neighborhoodMask.processor.convertToShort(false));
     }
 
     /**
@@ -517,42 +559,31 @@ public class smFRETSpotFinder implements Command {
      * converts neighborhood mask for use as a background mask.
      */
     private ImagePlus neighborhoodMaskToBackgroundMask(ImagePlus neighborhoodMask) {
-        ImagePlus backgroundMask = neighborhoodMask.duplicate();
-        backgroundMask.setTitle("foreground_mask");
-        ImageProcessor imp = backgroundMask.getProcessor();
-
-        for (int i = 0; i < backgroundMask.getWidth(); i++){
-            for (int j = 0; j < backgroundMask.getHeight(); j++) {
-                if (backgroundMask.getPixel(i,j)[0] > 0){
-                    imp.putPixel(i,j,0);
-                }
-                else{
-                    imp.putPixel(i,j,1);
-                }
-            }
-        }
-        return backgroundMask;
+        return invertNeighborhoodMask(neighborhoodMask, "foreground_mask", 0.0f);
     }
 
     /**
      * converts neighborhood mask for use to detect spots that are too close to each other.
      */
     private ImagePlus neighborhoodMaskToProximityMask(ImagePlus neighborhoodMask) {
-        ImagePlus proximityMask = neighborhoodMask.duplicate();
-        proximityMask.setTitle("overlap_mask");
-        ImageProcessor imp = proximityMask.getProcessor();
+        return invertNeighborhoodMask(neighborhoodMask, "overlap_mask", 1.0f);
+    }
 
-        for (int i = 0; i < proximityMask.getWidth(); i++){
-            for (int j = 0; j < proximityMask.getHeight(); j++) {
-                if (proximityMask.getPixel(i,j)[0] > 1){
-                    imp.putPixel(i,j,0);
-                }
-                else{
-                    imp.putPixel(i,j,1);
-                }
-            }
-        }
-        return proximityMask;
+    /**
+     * Mark the pixels where the neighbourhood count is at or below limit, and clear the rest.
+     *
+     * The two callers differ only in that limit: a pixel is background if no spot's neighbourhood
+     * reached it at all, and is far enough from its neighbours if at most one did.
+     */
+    private ImagePlus invertNeighborhoodMask(ImagePlus neighborhoodMask, String title, float limit) {
+        RandomAccessibleInterval<FloatType> counts = ImageJFunctions.convertFloat(neighborhoodMask);
+        Shared inverted = new Shared((int) counts.dimension(0), (int) counts.dimension(1));
+
+        LoopBuilder.setImages(inverted.img, counts)
+                .forEachPixel((out, count) -> out.set((count.get() > limit) ? 0.0f : 1.0f));
+
+        ImagePlus mask = new ImagePlus(title, inverted.processor.convertToShort(false));
+        return mask;
     }
 
     /**
@@ -593,7 +624,7 @@ public class smFRETSpotFinder implements Command {
         int last_col = filteredSpots[0].length-1;
 
         int srad = (int)(Math.round(2.0*spotSigma));
-        ImagePlus fgImage = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
+        Shared fgImage = foreground(sumImage, backgroundImage);
         for (int i = 0; i < spots.length; i++) {
             System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
 
@@ -601,12 +632,12 @@ public class smFRETSpotFinder implements Command {
             int y = (int)spots[i][2];
 
             // Calculate spot lowest prominence over pixels in circular neighborhood.
-            double spotHeight = fgImage.getPixel(x,y)[0];
+            double spotHeight = valueAt(fgImage, x, y);
             double lowestProminence = spotHeight;
             for (int rx = -srad; rx <= srad; rx += 1){
                 for (int ry = -srad; ry <= srad; ry += 1){
                     if (rx*rx+ry*ry >= (srad-1)*(srad-1) && rx*rx+ry*ry <= (srad+1)*(srad+1)){
-                        double pixelHeight = Math.max(1, fgImage.getPixel(x+rx,y+ry)[0]);
+                        double pixelHeight = Math.max(1, valueAt(fgImage, x+rx, y+ry));
                         double prominence = spotHeight/pixelHeight;
                         if (prominence < lowestProminence){
                             lowestProminence = prominence;
@@ -632,15 +663,12 @@ public class smFRETSpotFinder implements Command {
         double[][] filteredSpots = new double[spots.length][spots[0].length+1];
         int last_col = filteredSpots[0].length-1;
 
-        ImagePlus fgSmooth = ImageCalculator.run(sumImage, backgroundImage, "subtract create");
-        ImageProcessor impFg = fgSmooth.getProcessor();
-        impFg.blurGaussian(spotSigma);
-        fgSmooth.setTitle("foreground_smooth");
+        Shared fgSmooth = foreground(sumImage, backgroundImage);
+        fgSmooth.processor.blurGaussian(spotSigma);
 
-        ImagePlus bgSmooth = backgroundImage.duplicate();
-        ImageProcessor impBg = bgSmooth.getProcessor();
-        impBg.blurGaussian(spotSigma);
-        bgSmooth.setTitle("background_smooth");
+        Shared bgSmooth = new Shared(
+                (FloatProcessor) backgroundImage.getProcessor().convertToFloatProcessor().duplicate());
+        bgSmooth.processor.blurGaussian(spotSigma);
 
         // In order to calculate the SNR integrated over the spot we need the integrated magnitude
         // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when
@@ -652,8 +680,8 @@ public class smFRETSpotFinder implements Command {
             int x = (int)spots[i][1];
             int y = (int)spots[i][2];
 
-            double fg = norm*cameraGain*(fgSmooth.getPixel(x,y)[0]);
-            double bg = norm*cameraGain*(bgSmooth.getPixel(x,y)[0] - 2*cameraBlackLevel);
+            double fg = norm*cameraGain*valueAt(fgSmooth, x, y);
+            double bg = norm*cameraGain*(valueAt(bgSmooth, x, y) - 2*cameraBlackLevel);
 
             if (bg > 1){
                 bg = Math.sqrt(bg);
@@ -672,14 +700,46 @@ public class smFRETSpotFinder implements Command {
         }
 
         if (diagnostic_mode) {
-            FileSaver fgSmoothImageSaver = new FileSaver(fgSmooth);
+            FileSaver fgSmoothImageSaver = new FileSaver(new ImagePlus("foreground_smooth", fgSmooth.processor));
             fgSmoothImageSaver.saveAsTiff(saveRootName + "_spotf_fg_smooth.tif");
 
-            FileSaver bgSmoothImageSaver = new FileSaver(bgSmooth);
+            FileSaver bgSmoothImageSaver = new FileSaver(new ImagePlus("background_smooth", bgSmooth.processor));
             bgSmoothImageSaver.saveAsTiff(saveRootName + "_spotf_bg_smooth.tif");
         }
 
         return filteredSpots;
+    }
+
+    /**
+     * The spot signal: the channel sum with the background estimate taken off, in float.
+     *
+     * This was ImageCalculator's "subtract create", which took its type from the first operand.
+     * With the sum now float rather than 8 bit, negatives survive instead of clamping at zero and
+     * bright pixels are no longer pinned at 255.
+     */
+    private Shared foreground(ImagePlus sumImage, ImagePlus backgroundImage) {
+        RandomAccessibleInterval<FloatType> sum = ImageJFunctions.convertFloat(sumImage);
+        RandomAccessibleInterval<FloatType> background = ImageJFunctions.convertFloat(backgroundImage);
+
+        Shared foreground = new Shared((int) sum.dimension(0), (int) sum.dimension(1));
+        LoopBuilder.setImages(foreground.img, sum, background)
+                .forEachPixel((out, s, b) -> out.set(s.get() - b.get()));
+        return foreground;
+    }
+
+    /**
+     * Value at a pixel, or zero off the edge of the image.
+     *
+     * Reads used to go through ImagePlus.getPixel, which returned zero outside the image - the
+     * prominence filter walks a ring around each spot and relies on that. It cannot be used here
+     * any more regardless: on a float image getPixel returns the raw bits of the float, not the
+     * value.
+     */
+    private static float valueAt(Shared image, int x, int y) {
+        if ((x < 0) || (y < 0) || (x >= image.width) || (y >= image.height)) {
+            return 0.0f;
+        }
+        return image.pixels[y * image.width + x];
     }
 
     /**
@@ -731,8 +791,19 @@ public class smFRETSpotFinder implements Command {
             log.info("split and transform");
             java.util.List<ImagePlus> images = smfcm.splitImagePlus(averageImage, true);
 
-            ImagePlus sumImage = ImageCalculator.run(images.get(0), images.get(1), "add create");
-            sumImage.setTitle("spot_qc_image");
+            // Added in float. This was ImageCalculator's "add create", which takes the result type
+            // from its first argument - the target half, which for an 8 bit movie is 8 bit, so the
+            // sum of the two channels saturated at 255. On the example data that pinned 20 pixels,
+            // and they were spot centres, which is exactly where the signal is. Everything
+            // downstream of here - the maxima, the SNR, the prominence - was reading a clipped
+            // image.
+            RandomAccessibleInterval<FloatType> targetHalf = ImageJFunctions.convertFloat(images.get(0));
+            RandomAccessibleInterval<FloatType> sourceHalf = ImageJFunctions.convertFloat(images.get(1));
+            Shared sum = new Shared((int) targetHalf.dimension(0), (int) targetHalf.dimension(1));
+            LoopBuilder.setImages(sum.img, targetHalf, sourceHalf)
+                    .forEachPixel((out, t, s) -> out.set(t.get() + s.get()));
+
+            ImagePlus sumImage = new ImagePlus("spot_qc_image", sum.processor);
 
             // find all spots in tne sum image.
             double[][] allSpots = getMaxima(sumImage);

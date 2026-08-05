@@ -85,6 +85,8 @@ Nothing is written unless you ask for it:
 
 ## Input requirements ##
 
+The image stack must be a **time series**: one frame per time point, both FRET channels side by side within each frame. ImageJ cannot distinguish a movie from a depth stack saved as a plain TIFF, so a stack with a single non-singleton axis is taken as time whichever way ImageJ labelled it. Images with both depth and time, or with more than one channel, are refused — reduce them with `Image > Hyperstacks > Hyperstack to Stack` first.
+
 All three analysis plugins require **8, 16 or 32 bit grayscale** images and refuse anything else, since they assume one intensity per pixel. RGB and colour-indexed images are rejected with a message rather than measured. An 8 bit image carrying a colour lookup table is also refused, because its values may be palette indices; if they really are intensities, clear the table with `Image > Lookup Tables > Grays`.
 
 ## Dependencies ##

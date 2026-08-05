@@ -87,17 +87,21 @@ public class smFRETChannelMapper implements Command {
      */
     public ImagePlus averageImagePlus(ImagePlus image, int iStart, int iEnd) {
 
-        // FIXME: ImagePlus image could have frames instead of slices?
+        // Frames, not slices. A stack saved with t=30, z=1 has one slice and thirty frames, and
+        // asking for getNSlices there returned 1 and skipped the averaging altogether - handing
+        // back the whole movie where the caller expected a single averaged image, and quietly
+        // analysing only its first frame. This is the FIXME that used to sit here.
+        int nFrames = frameCount(image);
 
-        if (image.getNSlices() == 1){
+        if (nFrames == 1){
             return image.duplicate();
         }
 
         // Assuming 1 based indexing, as ZProjector used.
         if (iStart < 1) { iStart = 1; }
-        if (iStart > (image.getNSlices() - 1)) { iStart = image.getNSlices() - 1; }
+        if (iStart > (nFrames - 1)) { iStart = nFrames - 1; }
         if (iEnd < (iStart+1)) { iEnd = iStart + 1; }
-        if (iEnd > image.getNSlices()) { iEnd = image.getNSlices(); }
+        if (iEnd > nFrames) { iEnd = nFrames; }
 
         log.info("averaging slices " + iStart + " to " + iEnd);
 
@@ -167,6 +171,53 @@ public class smFRETChannelMapper implements Command {
         }
         throw new smFRETAnalysisException("Error: " + description + " is " + actual
                 + ". This plugin needs 8, 16 or 32 bit grayscale." + remedy);
+    }
+
+    /**
+     * Reject stacks whose third axis is not simply time.
+     *
+     * A word on what this can and cannot check. ImageJ cannot tell a movie from a depth stack
+     * when either is saved as a plain TIFF: the example data reports z=30, t=1, and so does a
+     * genuine 30 slice volume. There is no flag to read, so requiring t>1 would refuse every
+     * movie this plugin has ever been run on. A stack with one non-singleton axis is therefore
+     * taken as a time series, which is the convention the whole pipeline already assumes, and
+     * `frameCount` reads that axis whichever of the two ImageJ has labelled it.
+     *
+     * What is checkable is everything with more than one non-singleton axis, and that is what
+     * this refuses. Both z and t above one is a real 4D acquisition, where which axis to walk is
+     * a question this plugin has no answer to. More than one channel is a different arrangement
+     * of the same data - here the two channels are side by side within each frame, not stored as
+     * separate channels - so it would be measured as a movie twice as long as it is.
+     */
+    static void requireTimeStack(ImagePlus image, String description) {
+        int channels = image.getNChannels();
+        int depth = image.getNSlices();
+        int frames = image.getNFrames();
+
+        if (channels > 1) {
+            throw new smFRETAnalysisException("Error: " + description + " has " + channels
+                    + " channels. This plugin expects the two FRET channels side by side within a"
+                    + " single channel image, one frame per time point."
+                    + " Split it with Image > Color > Split Channels if the channels are stored separately.");
+        }
+
+        if ((depth > 1) && (frames > 1)) {
+            throw new smFRETAnalysisException("Error: " + description + " has both depth (" + depth
+                    + " slices) and time (" + frames + " frames). This plugin measures a time series"
+                    + " and cannot tell which axis to follow."
+                    + " Reduce it to one axis with Image > Hyperstacks > Hyperstack to Stack.");
+        }
+    }
+
+    /**
+     * How many time points the stack holds.
+     *
+     * Whichever axis ImageJ labelled, after requireTimeStack only one of them is longer than a
+     * single element, so the stack size is the frame count. Reading getNSlices instead - which is
+     * what this used to do - silently treated a stack saved with t=30, z=1 as a single frame.
+     */
+    static int frameCount(ImagePlus image) {
+        return image.getStackSize();
     }
 
     /**
@@ -458,6 +509,7 @@ public class smFRETChannelMapper implements Command {
             //ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
             requireGrayscale(inputImage, "the mapping image " + inputImageName);
+            requireTimeStack(inputImage, "the mapping image " + inputImageName);
 
             log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
 

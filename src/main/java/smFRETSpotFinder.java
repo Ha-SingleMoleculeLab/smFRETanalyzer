@@ -809,12 +809,13 @@ public class smFRETSpotFinder implements Command {
             // Load the image to process.
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
             smFRETChannelMapper.requireGrayscale(inputImage, "the image " + inputImageName);
+            smFRETChannelMapper.requireTimeStack(inputImage, "the image " + inputImageName);
 
             // Load the channel to channel mapping file.
             loadMappingJSON(mappingFile.toString());
 
             // Average image.
-            log.info("average image - " + inputImage.getNSlices() + " slices");
+            log.info("average image - " + smFRETChannelMapper.frameCount(inputImage) + " frames");
             ImagePlus averageImage = smfcm.averageImagePlus(inputImage, startSlice, endSlice);
 
             // split, transform and add the two channels together.

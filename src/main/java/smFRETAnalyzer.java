@@ -372,6 +372,7 @@ public class smFRETAnalyzer implements Command {
             // Load image to process.
             ImagePlus image = new ImagePlus(inputImageName);
             smFRETChannelMapper.requireGrayscale(image, "the image " + inputImageName);
+            smFRETChannelMapper.requireTimeStack(image, "the image " + inputImageName);
 
             // Estimate background in the two image channels.
             log.info("estimating background in channels");

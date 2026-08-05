@@ -52,7 +52,7 @@ This plugin measures the FRET time traces for each of the spots in the FRET imag
 #### Parameters:
 
 * Spot Finder JSON file - The JSON file containing the results from smFRETSpotFinder analysis of the FRET image stack.
-* BackgroundAverageNFrames - How many slices/frames to use for temporal averaging for background estimation.
+* BackgroundAverageNFrames - How many slices/frames to average for the background estimate. This is the **whole window**, not a radius: 30 averages 30 frames, centred on the frame being estimated (leaning one frame forward when the width is even). The window shrinks rather than extrapolating at the start and end of the movie. Before this was fixed the value was passed to `Filters3D` as a z *radius*, so 30 averaged 61 frames.
 
 #### Outputs:
 

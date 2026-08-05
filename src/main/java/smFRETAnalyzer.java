@@ -196,22 +196,31 @@ public class smFRETAnalyzer implements Command {
     }
 
     /**
-     * Mean of each pixel over a window of +/- halfWidth frames.
+     * Mean of each pixel over a window windowFrames frames wide.
+     *
+     * windowFrames is the whole window, not a radius - "how many frames to average", which is what
+     * the parameter has always claimed to be. Filters3D took a *radius* on the z axis, so passing
+     * it 30 averaged 61 frames; this averages 30. An even width cannot sit symmetrically on a
+     * frame, so it leans one frame forward.
      *
      * The window shrinks at the ends of the movie rather than being filled with invented frames,
      * which is the other FIXME this replaced: an out of bounds strategy would either repeat the
      * first frame, weighting it several times over, or mirror the movie back on itself. Averaging
      * only the frames that exist does neither, at the cost of a noisier estimate in the first and
-     * last halfWidth frames - which is honest, since there is less data there.
+     * last half window - which is honest, since there is less data there.
      *
      * Carried as a running sum, so the cost is one pass over the movie rather than one pass per
      * frame. Accumulated in double: a float sum drifts over the thousands of add-and-subtract
      * rounds a long movie needs.
      */
-    private ImageStack temporalMean(ImageStack stack, int halfWidth) {
+    private ImageStack temporalMean(ImageStack stack, int windowFrames) {
         int width = stack.getWidth();
         int height = stack.getHeight();
         int depth = stack.size();
+
+        int frames = Math.max(1, windowFrames);
+        int before = (frames - 1) / 2;
+        int after = frames - 1 - before;
 
         Img<FloatType> movie = ImageJFunctions.convertFloat(new ImagePlus("movie", stack));
         Img<DoubleType> sum = ArrayImgs.doubles(width, height);
@@ -220,8 +229,8 @@ public class smFRETAnalyzer implements Command {
         int low = 0;
         int high = -1;
         for (int z = 0; z < depth; z++) {
-            int wantLow = Math.max(0, z - halfWidth);
-            int wantHigh = Math.min(depth - 1, z + halfWidth);
+            int wantLow = Math.max(0, z - before);
+            int wantHigh = Math.min(depth - 1, z + after);
 
             while (high < wantHigh) {
                 high++;

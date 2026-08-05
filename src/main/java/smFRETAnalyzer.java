@@ -11,7 +11,7 @@ import ij.ImagePlus;
 import ij.ImageStack;
 import ij.io.FileSaver;
 import ij.plugin.Filters3D;
-import ij.process.ImageConverter;
+import ij.process.FloatProcessor;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
 import org.scijava.command.Command;
@@ -133,9 +133,11 @@ public class smFRETAnalyzer implements Command {
      */
     public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, double[][] spots, double spotSigma, double cameraGain){
         ImageStack imageS = image.getStack();
-        // Duplicating so we don't modify the input image.
-        ImageStack targetBg = bgEstimates.get(0).getStack().duplicate();
-        ImageStack sourceBg = bgEstimates.get(1).getStack().duplicate();
+
+        // Not duplicated any more: smoothed() copies before it blurs, so nothing here writes to
+        // the stacks it was handed.
+        ImageStack targetBg = bgEstimates.get(0).getStack();
+        ImageStack sourceBg = bgEstimates.get(1).getStack();
         double[][] timeTraces = new double[2*spots.length][imageS.getSize()];
 
         IJ.showStatus("Measuring time traces..");
@@ -153,42 +155,50 @@ public class smFRETAnalyzer implements Command {
 
             // Split, transform source to target and Gaussian smoothing.
             java.util.List<ImagePlus> splitImages = smfsf.splitImagePlus(tmp);
-            ImagePlus targetImgI = splitImages.get(0);
-            new ImageConverter(targetImgI).convertToGray32();
-            ImageProcessor targetImgIImp = targetImgI.getProcessor();
-            targetImgIImp.blurGaussian(spotSigma);
-
-            ImagePlus sourceImgI = splitImages.get(1);
-            new ImageConverter(sourceImgI).convertToGray32();
-            ImageProcessor sourceImgIImp = sourceImgI.getProcessor();
-            sourceImgIImp.blurGaussian(spotSigma);
+            smFRETSpotFinder.Shared targetImgI = smoothed(splitImages.get(0), spotSigma);
+            smFRETSpotFinder.Shared sourceImgI = smoothed(splitImages.get(1), spotSigma);
 
             // Gaussian smoothing of background.
-            ImagePlus targetImgIBg = new ImagePlus("tmp_fg", targetBg.getProcessor(i));
-            new ImageConverter(targetImgIBg).convertToGray32();
-            ImageProcessor targetImgIBgImp = targetImgIBg.getProcessor();
-            targetImgIBgImp.blurGaussian(spotSigma);
+            smFRETSpotFinder.Shared targetImgIBg = smoothed(targetBg.getProcessor(i), spotSigma);
+            smFRETSpotFinder.Shared sourceImgIBg = smoothed(sourceBg.getProcessor(i), spotSigma);
 
-            ImagePlus sourceImgIBg = new ImagePlus("tmp_bg", sourceBg.getProcessor(i));
-            new ImageConverter(sourceImgIBg).convertToGray32();
-            ImageProcessor sourceImgIBgImp = sourceImgIBg.getProcessor();
-            sourceImgIBgImp.blurGaussian(spotSigma);
-
-            // Record spot intensities in both channels.
+            // Record spot intensities in both channels. Reading the backing array directly is the
+            // same value ImageProcessor.getValue returned, without going through ImagePlus - but
+            // getValue handed back a double, so the subtraction has to be widened by hand. Left
+            // in float it lands 1e-4 away, which is nothing next to the signal and still enough
+            // to make this migration visible in the traces.
             for (int j = 0; j < spots.length; j++) {
                 int x = (int)spots[j][0];
                 int y = (int)spots[j][1];
+                int index = y * targetImgI.width + x;
 
-                timeTraces[2 * j][i - 1] = norm * cameraGain * (targetImgIImp.getValue(x, y) - targetImgIBgImp.getValue(x, y));
-                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * (sourceImgIImp.getValue(x, y) - sourceImgIBgImp.getValue(x, y));
-
-//                timeTraces[2 * j][i - 1] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
-//                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
-
+                timeTraces[2 * j][i - 1] = norm * cameraGain
+                        * ((double) targetImgI.pixels[index] - (double) targetImgIBg.pixels[index]);
+                timeTraces[2 * j + 1][i - 1] = norm * cameraGain
+                        * ((double) sourceImgI.pixels[index] - (double) sourceImgIBg.pixels[index]);
             }
         }
 
         return timeTraces;
+    }
+
+    /**
+     * A float copy of an image, smoothed at the spot scale.
+     *
+     * The blur is ImageJ1's, deliberately: Gauss3 differs from it by enough to move these traces,
+     * measured at 0.04 ADU at this sigma. Shared lets the blur run over the same array the rest
+     * of the pipeline reads as imglib2, so there is no conversion around it. The copy is what
+     * makes it safe to hand this a processor belonging to a stack.
+     */
+    private static smFRETSpotFinder.Shared smoothed(ImagePlus image, double sigma) {
+        return smoothed(image.getProcessor(), sigma);
+    }
+
+    private static smFRETSpotFinder.Shared smoothed(ImageProcessor image, double sigma) {
+        smFRETSpotFinder.Shared copy = new smFRETSpotFinder.Shared(
+                (FloatProcessor) image.convertToFloatProcessor().duplicate());
+        copy.processor.blurGaussian(sigma);
+        return copy;
     }
 
     /**

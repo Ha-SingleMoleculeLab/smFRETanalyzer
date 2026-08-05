@@ -222,7 +222,7 @@ public class smFRETSpotFinder implements Command {
      * Sharing the pixel array lets those two run in place while everything else is imglib2, with
      * no conversion between them.
      */
-    private static final class Shared {
+    static final class Shared {
         final int height;
         final ArrayImg<FloatType, FloatArray> img;
         final float[] pixels;

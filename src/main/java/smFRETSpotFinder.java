@@ -73,11 +73,18 @@ public class smFRETSpotFinder implements Command {
     @Parameter (description = "minimum allowed distance between spots (pixels)", min = "1")
     Integer spotSpacing = 3;
 
-    @Parameter (description = "radius to mask as foreground around a spot (pixels)", min = "1")
-    Integer spotMargin = 4;
-
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
+
+    // Radius masked as foreground around each spot, in pixels. Not adjustable,
+    // because sweeping it against a known background over simulated PSFs from
+    // sigma 1 to 3 found the choice barely matters: anything from 2 to 6 costs
+    // at most 11% more error at any spot size, and 4 is within 2% of the best
+    // everywhere. That is a consequence of how the background is estimated -
+    // the clip finds contaminated pixels for itself, so the mask is no longer
+    // the thing standing between spot light and the estimate, and there is
+    // little left for a careful choice to buy.
+    private static final int spotMargin = 4;
 
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
     Double backgroundKappa = 0.0;

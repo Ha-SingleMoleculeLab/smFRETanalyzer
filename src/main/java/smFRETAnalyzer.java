@@ -275,8 +275,10 @@ public class smFRETAnalyzer implements Command {
 
             // Initialize spot finder object.
             smfsf.log = log;
-            smfsf.spotMargin = (Integer) mapping.get("spot margin");
-            smfsf.edgeMargin = (Integer) mapping.get("edge margin");
+            // Neither the spot margin nor the edge margin is set here any more.
+            // Both only ever mattered to background estimation, and that now
+            // takes its mask from the masks file and its smoothing from a
+            // constant, so nothing downstream of loadMasks reads either one.
             // Absent from spot finder JSON written before background estimation changed, in
             // which case the estimator's own default stands.
             Object kappa = mapping.get("background kappa");

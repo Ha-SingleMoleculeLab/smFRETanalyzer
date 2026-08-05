@@ -549,7 +549,7 @@ public class smFRETSpotFinder implements Command {
         LoopBuilder.setImages(overlapSum.img, targetHalf, sourceHalf)
                 .forEachPixel((out, a, b) -> out.set(((a.get() + b.get()) > 190.0f) ? 1.0f : 0.0f));
 
-        return new ImagePlus("overlap_mask", overlapSum.processor.convertToShort(false));
+        return new ImagePlus("overlap_mask", overlapSum.processor);
     }
 
     /**
@@ -578,7 +578,7 @@ public class smFRETSpotFinder implements Command {
                     .forEachPixel((total, one) -> total.set(total.get() + one.get()));
         }
 
-        return new ImagePlus("neighborhood_mask", neighborhoodMask.processor.convertToShort(false));
+        return new ImagePlus("neighborhood_mask", neighborhoodMask.processor);
     }
 
     /**
@@ -708,7 +708,7 @@ public class smFRETSpotFinder implements Command {
         LoopBuilder.setImages(inverted.img, counts)
                 .forEachPixel((out, count) -> out.set((count.get() > limit) ? 0.0f : 1.0f));
 
-        ImagePlus mask = new ImagePlus(title, inverted.processor.convertToShort(false));
+        ImagePlus mask = new ImagePlus(title, inverted.processor);
         return mask;
     }
 
@@ -880,7 +880,8 @@ public class smFRETSpotFinder implements Command {
 
             int x = (int)spots[i][1];
             int y = (int)spots[i][2];
-            if (mask.getPixel(x,y)[0] == 0){
+            // getf, not getPixel: on a float image getPixel hands back the raw bits of the float.
+            if (mask.getProcessor().getf(x, y) == 0.0f){
                 filteredSpots[i][0] = 0.0;
             }
         }
@@ -909,6 +910,7 @@ public class smFRETSpotFinder implements Command {
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
             smFRETChannelMapper.requireGrayscale(inputImage, "the image " + inputImageName);
             smFRETChannelMapper.requireTimeStack(inputImage, "the image " + inputImageName);
+            inputImage = smFRETChannelMapper.toFloat(inputImage);
 
             // Load the channel to channel mapping file.
             loadMappingJSON(mappingFile.toString());

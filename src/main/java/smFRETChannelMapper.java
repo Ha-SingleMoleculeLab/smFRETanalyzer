@@ -18,13 +18,12 @@ import java.util.*;
 
 import ij.IJ;
 import ij.ImagePlus;
+import ij.ImageStack;
 import ij.io.FileSaver;
 import ij.plugin.RGBStackMerge;
-import ij.process.ByteProcessor;
 import ij.process.FloatProcessor;
 import ij.process.ImageConverter;
 import ij.process.ImageProcessor;
-import ij.process.ShortProcessor;
 
 import net.imglib2.Cursor;
 import net.imglib2.RandomAccessibleInterval;
@@ -115,7 +114,7 @@ public class smFRETChannelMapper implements Command {
         final float n = iEnd - iStart + 1;
         LoopBuilder.setImages(mean).forEachPixel(m -> m.set(m.get() / n));
 
-        ImagePlus averaged = new ImagePlus("average", toProcessor(mean, image.getBitDepth()));
+        ImagePlus averaged = new ImagePlus("average", toProcessor(mean));
         averaged.setCalibration(image.getCalibration());
         return averaged;
     }
@@ -221,41 +220,38 @@ public class smFRETChannelMapper implements Command {
     }
 
     /**
-     * Round a float result back into an ImageJ1 processor of the given depth.
+     * Hand an imglib2 result back as an ImageJ1 processor. Always float.
      *
-     * The arithmetic is ImageJ1's own float conversion - add a half and truncate, clamping at the
-     * type's limits - because these values are compared against, and written into, files produced
-     * before any of this was imglib2.
+     * This used to round into whatever type the input had, which put a quantization step between
+     * every stage: the averaged image back to 8 bit, the warped half to 16, the background to 8.
+     * Each one threw away a fraction of an ADU, and on a trace - which is 2*pi*sigma^2 times a
+     * difference of two of these - a single ADU is 25 units. Everything internal is float now and
+     * so is everything written out, which costs disk in diagnostic mode and nothing in accuracy.
      */
-    static ImageProcessor toProcessor(RandomAccessibleInterval<FloatType> image, int bitDepth) {
+    static FloatProcessor toProcessor(RandomAccessibleInterval<FloatType> image) {
         int width = (int) image.dimension(0);
         int height = (int) image.dimension(1);
+        return new FloatProcessor(width, height, flatten(image, width * height), null);
+    }
 
-        float[] raw = flatten(image, width * height);
-
-        if (bitDepth == 32) {
-            return new FloatProcessor(width, height, raw, null);
+    /**
+     * Convert a stack to float once, at the point it is read, so nothing downstream has to think
+     * about the camera's bit depth again.
+     */
+    static ImagePlus toFloat(ImagePlus image) {
+        if (image.getBitDepth() == 32) {
+            return image;
         }
 
-        if (bitDepth == 8) {
-            byte[] pixels = new byte[raw.length];
-            for (int i = 0; i < raw.length; i++) {
-                double value = raw[i] + 0.5;
-                if (value < 0.0) { value = 0.0; }
-                if (value > 255.0) { value = 255.0; }
-                pixels[i] = (byte) ((int) value & 255);
-            }
-            return new ByteProcessor(width, height, pixels, null);
+        ImageStack source = image.getStack();
+        ImageStack converted = new ImageStack(image.getWidth(), image.getHeight());
+        for (int i = 1; i <= source.size(); i++) {
+            converted.addSlice(source.getSliceLabel(i), source.getProcessor(i).convertToFloatProcessor());
         }
 
-        short[] pixels = new short[raw.length];
-        for (int i = 0; i < raw.length; i++) {
-            double value = raw[i] + 0.5;
-            if (value < 0.0) { value = 0.0; }
-            if (value > 65535.0) { value = 65535.0; }
-            pixels[i] = (short) (int) value;
-        }
-        return new ShortProcessor(width, height, pixels, null);
+        ImagePlus asFloat = new ImagePlus(image.getTitle(), converted);
+        asFloat.setCalibration(image.getCalibration());
+        return asFloat;
     }
 
     /**
@@ -385,7 +381,7 @@ public class smFRETChannelMapper implements Command {
         RandomAccessibleInterval<FloatType> sourceHalf =
                 Views.zeroMin(Views.interval(whole, new long[]{hw, 0}, new long[]{image.getWidth() - 1, height - 1}));
 
-        ImagePlus imageTarget = new ImagePlus("target", toProcessor(targetHalf, image.getBitDepth()));
+        ImagePlus imageTarget = new ImagePlus("target", toProcessor(targetHalf));
 
         // Transform source if requested.
         ImagePlus imageSource;
@@ -393,7 +389,7 @@ public class smFRETChannelMapper implements Command {
             imageSource = transformImagePlus(sourceHalf, hw, height);
         }
         else {
-            imageSource = new ImagePlus("source", toProcessor(sourceHalf, image.getBitDepth()));
+            imageSource = new ImagePlus("source", toProcessor(sourceHalf));
         }
 
         // Image stack in order target, source.
@@ -483,8 +479,7 @@ public class smFRETChannelMapper implements Command {
             target.get().set((float) source.get().get());
         }
 
-        // convert to 16 bit.
-        return new ImagePlus("transformed image", toProcessor(transformed, 16));
+        return new ImagePlus("transformed image", toProcessor(transformed));
     }
 
     /**
@@ -510,6 +505,10 @@ public class smFRETChannelMapper implements Command {
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
             requireGrayscale(inputImage, "the mapping image " + inputImageName);
             requireTimeStack(inputImage, "the mapping image " + inputImageName);
+
+            // Everything past here is float. Converting once, here, is what lets the rest of
+            // the pipeline stop asking what the camera produced.
+            inputImage = toFloat(inputImage);
 
             log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
 

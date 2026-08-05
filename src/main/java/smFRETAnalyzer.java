@@ -245,7 +245,7 @@ public class smFRETAnalyzer implements Command {
             Img<FloatType> mean = ArrayImgs.floats(width, height);
             LoopBuilder.setImages(mean, sum).forEachPixel((m, s) -> m.set((float) (s.get() / n)));
 
-            averaged.addSlice(smFRETChannelMapper.toProcessor(mean, stack.getBitDepth()));
+            averaged.addSlice(smFRETChannelMapper.toProcessor(mean));
         }
         return averaged;
     }
@@ -373,6 +373,7 @@ public class smFRETAnalyzer implements Command {
             ImagePlus image = new ImagePlus(inputImageName);
             smFRETChannelMapper.requireGrayscale(image, "the image " + inputImageName);
             smFRETChannelMapper.requireTimeStack(image, "the image " + inputImageName);
+            image = smFRETChannelMapper.toFloat(image);
 
             // Estimate background in the two image channels.
             log.info("estimating background in channels");

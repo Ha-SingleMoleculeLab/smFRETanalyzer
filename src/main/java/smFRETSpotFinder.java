@@ -130,7 +130,38 @@ public class smFRETSpotFinder implements Command {
     //
     // This used to be 2 * spotMargin, which with the default margin gave 8 and
     // cost 40 to 60% more error than 14 at every sigma above 1.
+    //
+    // If this is ever changed, backgroundDecimation has to be revisited with it -
+    // the two are tied, and the tie is not visible from either one alone.
     private static final double backgroundSmoothing = 14.0;
+
+    // Grid the background estimate is smoothed on, as a divisor of the full
+    // resolution: the estimate is binned by this, smoothed at
+    // backgroundSmoothing / backgroundDecimation, and interpolated back. 1 would
+    // smooth at full resolution.
+    //
+    // Worth 2.0x on stage 3 of a 1295 frame movie - 209 s to 103 s - for a
+    // background estimate that moves by an rms of 0.02 ADU on a level of 16,
+    // no spot moved on either test movie, and traces shifted by a median of
+    // 0.16%. For scale, removing the 8 bit quantization moved traces by 2.9%.
+    //
+    // 8 was measured and rejected: it saves a further 9 s and changes which
+    // molecules get measured (496 spots to 495 on the long movie, 2 lost and 1
+    // gained). Time is the cheaper thing to spend.
+    //
+    // WARNING: this is only safe because backgroundSmoothing is 14, which leaves
+    // 3.5 on the coarse grid. Binning is a box prefilter, so it adds
+    // backgroundDecimation^2 / 12 to the variance of the effective kernel - 1.3
+    // square pixels against sigma 14's 196, which is why the estimate barely
+    // moves. Lower backgroundSmoothing without lowering this and that ratio
+    // degrades as the square: at sigma 7 it is already 2.7% of the kernel
+    // variance and at sigma 3.5 it is 11%. Keep backgroundSmoothing /
+    // backgroundDecimation at 3.5 or above. There is nothing to lose by doing so
+    // - below about that sigma imglib2's convolution is dominated by its own
+    // per-call overhead rather than by the kernel, so a smaller coarse-grid sigma
+    // buys no speed either. This does not touch spotSigma: the decimation lives
+    // in maskedSmooth, which only ever runs at backgroundSmoothing.
+    private static final int backgroundDecimation = 4;
 
     // Member variables.
     public ImagePlus backgroundMask;
@@ -382,8 +413,13 @@ public class smFRETSpotFinder implements Command {
         // so the ratio stays the mean of the kept pixels that actually exist.
         Shared weightedSmooth = new Shared(image.width, image.height);
         Shared totalSmooth = new Shared(image.width, image.height);
-        gauss(sigma, Views.extendZero(weighted.img), weightedSmooth.img);
-        gauss(sigma, Views.extendZero(total.img), totalSmooth.img);
+        if (backgroundDecimation > 1) {
+            smoothDecimated(weighted, sigma, backgroundDecimation, weightedSmooth);
+            smoothDecimated(total, sigma, backgroundDecimation, totalSmooth);
+        } else {
+            gauss(sigma, Views.extendZero(weighted.img), weightedSmooth.img);
+            gauss(sigma, Views.extendZero(total.img), totalSmooth.img);
+        }
 
         // Only reached by a pixel with no kept neighbour anywhere in the kernel, which needs a
         // masked patch several times the smoothing scale across. It is a floor, not a fill.
@@ -394,6 +430,124 @@ public class smFRETSpotFinder implements Command {
                 .forEachPixel((out, sum, count) ->
                         out.set((count.get() > 1.0e-6f) ? (sum.get() / count.get()) : floor));
         return smoothed;
+    }
+
+    /**
+     * Gaussian smoothing done on a coarser grid and interpolated back.
+     *
+     * Gauss3 is a direct separable convolution - it truncates the kernel at three sigma and
+     * convolves, with no FFT anywhere - so it costs pixels times sigma, measured flat at 0.10 ns
+     * per tap-pixel from sigma 7 to sigma 28. Decimating by d cuts both factors: d squared fewer
+     * pixels and a kernel d times narrower. The blur alone therefore drops as d cubed, 3.34 ms to
+     * 0.26 ms at d of 4.
+     *
+     * The blur is not the whole cost, which is why d of 4 is the knee rather than a waypoint.
+     * Binning and interpolating back are both full resolution passes and do not shrink with d, so
+     * by d of 4 the three phases cost about the same and the total has fallen 3.34 ms to 0.75 ms -
+     * a factor of 4.5, not 64. Past that there is little of the blur left to remove.
+     *
+     * It is an approximation, but a mild and quantifiable one. Summing d by d blocks is a box
+     * prefilter, which adds d squared over twelve to the variance of the effective kernel - 1.3
+     * square pixels at d of 4 against sigma 14's 196, so the kernel this actually applies is
+     * sigma 14.05. The estimate is a surface that varies on a 14 pixel scale being sampled every
+     * d pixels, which is far above what it needs. See backgroundDecimation for what that ratio
+     * costs if sigma is lowered without lowering d.
+     *
+     * Both the weighted sum and the weight are summed rather than averaged, and each is
+     * decimated the same way, so the d squared factors cancel when the caller divides one by
+     * the other. Blocks that hang off the right or bottom edge are simply short, which the
+     * weight image already accounts for.
+     */
+    private static void smoothDecimated(Shared image, double sigma, int decimation, Shared target) {
+        Shared binned = bin(image, decimation);
+        Shared smoothed = new Shared(binned.width, binned.height);
+        gauss(sigma / decimation, Views.extendZero(binned.img), smoothed.img);
+        unbin(smoothed, decimation, target);
+    }
+
+    /**
+     * Sum each decimation by decimation block of pixels into one.
+     */
+    private static Shared bin(Shared image, int decimation) {
+        Shared binned = new Shared(
+                (image.width + decimation - 1) / decimation,
+                (image.height + decimation - 1) / decimation);
+        for (int y = 0; y < image.height; y++) {
+            int source = y * image.width;
+            int row = (y / decimation) * binned.width;
+            for (int x = 0; x < image.width; x++) {
+                binned.pixels[row + (x / decimation)] += image.pixels[source + x];
+            }
+        }
+        return binned;
+    }
+
+    /**
+     * Interpolate a binned image back to full size.
+     *
+     * The block starting at full resolution x covers x to x + decimation - 1, so its centre - the
+     * point the binned pixel actually stands for - is half a block in from its corner. Ignoring
+     * that offset would shift the whole background estimate by (decimation - 1) / 2 pixels.
+     */
+    private static void unbin(Shared binned, int decimation, Shared target) {
+        int width = target.width;
+        int height = target.height;
+
+        int[] left = new int[width];
+        int[] right = new int[width];
+        float[] acrossWeight = new float[width];
+        interpolationWeights(width, binned.width, decimation, left, right, acrossWeight);
+
+        int[] above = new int[height];
+        int[] below = new int[height];
+        float[] downWeight = new float[height];
+        interpolationWeights(height, binned.height, decimation, above, below, downWeight);
+
+        float[] source = binned.pixels;
+        for (int y = 0; y < height; y++) {
+            int upper = above[y] * binned.width;
+            int lower = below[y] * binned.width;
+            float fy = downWeight[y];
+            int row = y * width;
+            for (int x = 0; x < width; x++) {
+                int a = left[x];
+                int b = right[x];
+                float fx = acrossWeight[x];
+                float top = source[upper + a] + fx * (source[upper + b] - source[upper + a]);
+                float bottom = source[lower + a] + fx * (source[lower + b] - source[lower + a]);
+                target.pixels[row + x] = top + fy * (bottom - top);
+            }
+        }
+    }
+
+    /**
+     * The two binned samples each full resolution pixel sits between, and how far between them.
+     *
+     * Separable, so one pass along each axis is enough and the weights are reused down every row.
+     * This is deliberately arithmetic rather than an imglib2 NLinearInterpolator: interpolating
+     * through a RealRandomAccess costs a setPosition and a get per pixel, which measured at 4.8 ms
+     * on a 256 by 512 frame - more than the full resolution sigma 14 blur it exists to avoid.
+     *
+     * Positions off either end clamp to the last sample, matching extendBorder.
+     */
+    private static void interpolationWeights(int size, int binnedSize, int decimation,
+                                             int[] lower, int[] upper, float[] weight) {
+        double centre = 0.5 * (decimation - 1);
+        for (int p = 0; p < size; p++) {
+            double position = (p - centre) / decimation;
+            int index = (int) Math.floor(position);
+            double fraction = position - index;
+            if (index < 0) {
+                index = 0;
+                fraction = 0.0;
+            } else if (index >= (binnedSize - 1)) {
+                index = Math.max(binnedSize - 2, 0);
+                fraction = (binnedSize > 1) ? 1.0 : 0.0;
+            }
+            lower[p] = index;
+            upper[p] = Math.min(index + 1, binnedSize - 1);
+            weight[p] = (float) fraction;
+        }
     }
 
     /**

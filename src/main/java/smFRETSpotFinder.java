@@ -190,6 +190,18 @@ public class smFRETSpotFinder implements Command {
      * The clipping is deliberately one-sided. Contamination only ever makes a pixel brighter,
      * so rejecting symmetrically would throw away good dark pixels and pull the estimate down.
      *
+     * One-sidedness has a price, and it is paid back explicitly - see truncationConstants. Keeping
+     * only the pixels below kappa spread leaves a truncated sample whose mean sits below the true
+     * background, so the estimate reads low even where there is nothing to clip but noise. Measured
+     * at about 1 ADU, roughly 2.8 times the single-round prediction because four rounds compound it.
+     * That matters out of all proportion to its size: a trace is 2*pi*sigma^2 times frame minus
+     * background, so 1 ADU is 25 units of trace, and spotFilterSNR multiplies the same error by the
+     * same 2*pi*sigma^2 while the signal it is compared against grows only as sigma. The result was
+     * an SNR that climbed with spot size - +15% from sigma 1 to 3 at fixed true significance, and
+     * +46% at fixed molecular brightness - so spotThreshold silently meant something different on
+     * every movie. Correcting the level each round rather than once at the end is what keeps the
+     * clip in the right place and stops the bias compounding; it takes the drift to 0.5%.
+     *
      * The estimate is returned as float whatever the input was. It used to be rounded back into
      * the input's type, which on an 8 bit movie meant the background was quantized to whole ADU -
      * and since a trace is 2*pi*sigma^2 times the difference between the frame and the background,
@@ -245,6 +257,11 @@ public class smFRETSpotFinder implements Command {
         Shared estimate = null;
         float[] level = ((seed != null) && (seed.length == values.length)) ? seed : null;
 
+        // Whether keep has been through the clip, and so whether the statistics read off it are
+        // the truncated ones. The first round clips nothing, so its level and spread are honest.
+        boolean clipped = false;
+        truncationConstants(kappa);
+
         for (int round = 0; round < backgroundClipRounds; round++) {
 
             // Without a seed the first round has to smooth before it can clip. With one it clips
@@ -257,6 +274,9 @@ public class smFRETSpotFinder implements Command {
             double spread = robustSpread(values, level, keep, scratch);
             if (spread <= 0.0) {
                 break;
+            }
+            if (clipped) {
+                spread /= cachedMadFactor;
             }
 
             boolean[] fresh = new boolean[keep.length];
@@ -272,8 +292,17 @@ public class smFRETSpotFinder implements Command {
             }
 
             keep = fresh;
+            clipped = true;
             estimate = maskedSmooth(source, keep, smoothing, scratch);
             level = estimate.pixels;
+
+            // The level is now the mean of a sample truncated at kappa spread above it, which sits
+            // low by a known amount. Putting it back here rather than at the end keeps the next
+            // round's clip in the right place, which is what stopped the bias compounding.
+            float bump = (float) (cachedMeanOffset * spread);
+            for (int i = 0; i < level.length; i++) {
+                level[i] += bump;
+            }
         }
 
         // Reachable when a seeded first round finds nothing to clip: the level then still belongs
@@ -349,6 +378,86 @@ public class smFRETSpotFinder implements Command {
             img = ArrayImgs.floats(pixels, width, height);
             processor = source;
         }
+    }
+
+    private static double cachedKappa = Double.NaN;
+    private static double cachedMeanOffset;
+    private static double cachedMadFactor;
+
+    /**
+     * Normal CDF, via Abramowitz and Stegun 7.1.26. Good to about 1e-7, which is far past what
+     * a clipping correction needs.
+     */
+    private static double normalCdf(double x) {
+        double z = x / Math.sqrt(2.0);
+        double sign = (z < 0.0) ? -1.0 : 1.0;
+        double a = Math.abs(z);
+        double t = 1.0 / (1.0 + 0.3275911 * a);
+        double poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+                + t * (-1.453152027 + t * 1.061405429))));
+        double erf = sign * (1.0 - poly * Math.exp(-a * a));
+        return 0.5 * (1.0 + erf);
+    }
+
+    private static double normalPdf(double x) {
+        return Math.exp(-0.5 * x * x) / Math.sqrt(2.0 * Math.PI);
+    }
+
+    /** Smallest x with normalCdf(x) >= p, by bisection. */
+    private static double normalQuantile(double p) {
+        double lo = -10.0;
+        double hi = 10.0;
+        for (int i = 0; i < 80; i++) {
+            double mid = 0.5 * (lo + hi);
+            if (normalCdf(mid) < p) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return 0.5 * (lo + hi);
+    }
+
+    /**
+     * The two things one-sided clipping does to the level, as multiples of the true spread.
+     *
+     * Keeping only residuals below kappa sigma leaves a truncated Gaussian, and both statistics
+     * the estimator reads off it are biased:
+     *
+     *   - its *mean* - which is what maskedSmooth computes - sits phi(kappa)/Phi(kappa) below the
+     *     true mean. That is the bias being corrected;
+     *   - its *MAD* - which is what robustSpread reads - is smaller than an untruncated Gaussian's,
+     *     so the spread comes out low and a correction scaled by it would under-correct. The MAD is
+     *     taken about the truncated median, matching what robustSpread does, and solved numerically
+     *     because it has no closed form.
+     *
+     * Both reduce to their untruncated values as kappa grows: the offset to zero, the MAD factor to
+     * 1.4826 * 0.6745 = 1.
+     */
+    private static void truncationConstants(double kappa) {
+        if (kappa == cachedKappa) {
+            return;
+        }
+        double mass = normalCdf(kappa);
+        cachedMeanOffset = normalPdf(kappa) / mass;
+
+        // Median of the truncated distribution, which is what robustSpread centres on.
+        double median = normalQuantile(0.5 * mass);
+
+        // Half-width containing half the truncated mass about that median.
+        double lo = 0.0;
+        double hi = 10.0;
+        for (int i = 0; i < 80; i++) {
+            double d = 0.5 * (lo + hi);
+            double covered = normalCdf(Math.min(median + d, kappa)) - normalCdf(median - d);
+            if (covered < 0.5 * mass) {
+                lo = d;
+            } else {
+                hi = d;
+            }
+        }
+        cachedMadFactor = 1.4826 * 0.5 * (lo + hi);
+        cachedKappa = kappa;
     }
 
     /**

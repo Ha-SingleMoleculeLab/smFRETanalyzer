@@ -13,7 +13,6 @@ import ij.plugin.Concatenator;
 import ij.plugin.filter.MaximumFinder;
 import ij.process.FloatProcessor;
 import ij.process.ImageProcessor;
-import ij.process.ShortProcessor;
 
 import net.imglib2.RandomAccessible;
 import net.imglib2.algorithm.gauss3.Gauss3;
@@ -160,6 +159,13 @@ public class smFRETSpotFinder implements Command {
      * The clipping is deliberately one-sided. Contamination only ever makes a pixel brighter,
      * so rejecting symmetrically would throw away good dark pixels and pull the estimate down.
      *
+     * The estimate is returned as float whatever the input was. It used to be rounded back into
+     * the input's type, which on an 8 bit movie meant the background was quantized to whole ADU -
+     * and since a trace is 2*pi*sigma^2 times the difference between the frame and the background,
+     * one ADU there is 25 units of trace. That quantization was carrying about 0.3 ADU of rounding
+     * noise into every measurement, and it made any small disagreement in the estimate land as a
+     * full step rather than a small one.
+     *
      * Neither the clipping threshold nor the smoothing scale is asked for. The threshold comes
      * from spotSigma - see clippingThreshold - and the smoothing is a constant. Both were swept
      * against a known background over simulated PSFs from sigma 1 to 3, and what came out is
@@ -174,6 +180,25 @@ public class smFRETSpotFinder implements Command {
      *     illumination varies, not by the spots.
      */
     public ImagePlus backgroundEstimate(ImagePlus image) {
+        return backgroundEstimate(image, null).image;
+    }
+
+    /**
+     * As backgroundEstimate(image), but starting from a level a previous frame settled on.
+     *
+     * Consecutive frames of a movie share all but one frame of the temporal average behind
+     * them, and their backgrounds come out nearly identical - measured at 0.035 ADU mean
+     * change, with 3.5% of pixels moving at all. Recomputing the level from nothing each time
+     * therefore spends four or five sigma 14 smoothings rediscovering what the last frame
+     * already knew.
+     *
+     * It is the level that carries over, not the mask. The clip only ever removes pixels, so
+     * a mask handed from frame to frame would erode all the way down a long movie with
+     * nothing to restore it. The mask is rebuilt from the trusted pixels every frame; only
+     * the starting estimate is inherited, and one round of clipping against it lands where
+     * five rounds from scratch would.
+     */
+    public Background backgroundEstimate(ImagePlus image, float[] seed) {
         ImageProcessor original = image.getProcessor();
 
         // duplicate, because convertToFloatProcessor hands back the same object when the input is
@@ -186,9 +211,18 @@ public class smFRETSpotFinder implements Command {
         double smoothing = backgroundSmoothing;
         double kappa = clippingThreshold();
 
-        Shared estimate = maskedSmooth(source, keep, smoothing, scratch);
+        Shared estimate = null;
+        float[] level = ((seed != null) && (seed.length == values.length)) ? seed : null;
+
         for (int round = 0; round < backgroundClipRounds; round++) {
-            float[] level = estimate.pixels;
+
+            // Without a seed the first round has to smooth before it can clip. With one it clips
+            // straight away, against a level that is already close to this frame's answer.
+            if (level == null) {
+                estimate = maskedSmooth(source, keep, smoothing, scratch);
+                level = estimate.pixels;
+            }
+
             double spread = robustSpread(values, level, keep, scratch);
             if (spread <= 0.0) {
                 break;
@@ -208,10 +242,31 @@ public class smFRETSpotFinder implements Command {
 
             keep = fresh;
             estimate = maskedSmooth(source, keep, smoothing, scratch);
+            level = estimate.pixels;
         }
 
-        ImagePlus backgroundImage = new ImagePlus("background_image", matchType(estimate.processor, original));
-        return backgroundImage;
+        // Reachable when a seeded first round finds nothing to clip: the level then still belongs
+        // to the previous frame and has to be replaced, or the estimate would never again be
+        // derived from the frame it is subtracted from.
+        if (estimate == null) {
+            estimate = maskedSmooth(source, keep, smoothing, scratch);
+        }
+
+        ImagePlus backgroundImage = new ImagePlus("background_image", estimate.processor);
+        return new Background(backgroundImage, estimate.pixels);
+    }
+
+    /**
+     * A background estimate and the level it settled on, so the next frame can start from it.
+     */
+    public static final class Background {
+        public final ImagePlus image;
+        public final float[] level;
+
+        Background(ImagePlus image, float[] level) {
+            this.image = image;
+            this.level = level;
+        }
     }
 
     /**
@@ -379,30 +434,74 @@ public class smFRETSpotFinder implements Command {
     }
 
     /**
-     * Median of the first count entries, which are sorted in place.
+     * Median of the first count entries, which are partially reordered in place.
+     *
+     * Selection rather than a sort. This is called twice per clipping round, on up to every pixel
+     * in the frame, so on a long movie it ran to a few thousand full sorts of 131072 floats -
+     * 14% of the profile. Finding the middle element does not require ordering the rest, and both
+     * routines leave the same multiset behind, which is what robustSpread relies on when it reuses
+     * the scratch array for the absolute deviations.
      */
     private static double median(float[] values, int count) {
-        Arrays.sort(values, 0, count);
         int middle = count / 2;
-        if ((count % 2) == 0) {
-            return 0.5 * ((double) values[middle - 1] + (double) values[middle]);
+        double high = select(values, count, middle);
+        if ((count % 2) != 0) {
+            return high;
         }
-        return values[middle];
+
+        // Everything below the selected position is no greater than it, so the element below the
+        // median is the largest of them - no second selection needed.
+        float low = values[0];
+        for (int i = 1; i < middle; i++) {
+            if (values[i] > low) { low = values[i]; }
+        }
+        return 0.5 * ((double) low + high);
     }
 
     /**
-     * Put the estimate back into the type it was measured from, so that this stays a change of
-     * algorithm and not of precision. Writing it as float would drop the ~0.3 ADU of rounding
-     * noise the stored background carries, but that is a separate question with its own answer.
+     * The k-th smallest of the first count entries, partitioning in place around it.
+     *
+     * Quickselect with a median-of-three pivot, which keeps it deterministic - the same input
+     * gives the same work, so a run is reproducible - and keeps sorted or nearly sorted input,
+     * which is the pathological case for a naive pivot, away from quadratic.
      */
-    private static ImageProcessor matchType(FloatProcessor estimate, ImageProcessor template) {
-        if (template instanceof FloatProcessor) {
-            return estimate;
+    private static float select(float[] values, int count, int k) {
+        int low = 0;
+        int high = count - 1;
+
+        while (low < high) {
+            int middle = low + ((high - low) >> 1);
+            if (values[middle] < values[low]) { swap(values, middle, low); }
+            if (values[high] < values[low]) { swap(values, high, low); }
+            if (values[high] < values[middle]) { swap(values, high, middle); }
+            float pivot = values[middle];
+
+            int i = low;
+            int j = high;
+            while (i <= j) {
+                while (values[i] < pivot) { i++; }
+                while (values[j] > pivot) { j--; }
+                if (i <= j) {
+                    swap(values, i, j);
+                    i++;
+                    j--;
+                }
+            }
+
+            if (k <= j) { high = j; }
+            else if (k >= i) { low = i; }
+            else { return values[k]; }
         }
-        if (template instanceof ShortProcessor) {
-            return estimate.convertToShort(false);
-        }
-        return estimate.convertToByte(false);
+        return values[k];
+    }
+
+    /**
+     * select helper.
+     */
+    private static void swap(float[] values, int a, int b) {
+        float temp = values[a];
+        values[a] = values[b];
+        values[b] = temp;
     }
 
     /**

@@ -105,9 +105,9 @@ public class smFRETAnalyzer implements Command {
             ImagePlus targetImg = splitImages.get(0);
             ImagePlus sourceImg = splitImages.get(1);
 
-            // Estimate background in source and target. Each frame is estimated from scratch;
-            // the estimator settles in a fixed few rounds and has nothing to carry over from
-            // the previous frame the way the old inpainting fill did.
+            // Estimated from scratch each frame. Seeding this from the previous frame's level was
+            // tried and rejected - see backgroundEstimate - because it lands on a different answer
+            // rather than the same answer sooner.
             ImagePlus targetImgEst = smfsf.backgroundEstimate(targetImg);
             ImagePlus sourceImgEst = smfsf.backgroundEstimate(sourceImg);
 

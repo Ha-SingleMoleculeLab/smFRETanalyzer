@@ -224,8 +224,8 @@ public class smFRETChannelMapper implements Command {
      *
      * This used to round into whatever type the input had, which put a quantization step between
      * every stage: the averaged image back to 8 bit, the warped half to 16, the background to 8.
-     * Each one threw away a fraction of an ADU, and on a trace - which is 2*pi*sigma^2 times a
-     * difference of two of these - a single ADU is 25 units. Everything internal is float now and
+     * Each one threw away a fraction of an ADU, and on a trace - which is 4*pi*sigma^2 times a
+     * difference of two of these - a single ADU is 50 units. Everything internal is float now and
      * so is everything written out, which costs disk in diagnostic mode and nothing in accuracy.
      */
     static FloatProcessor toProcessor(RandomAccessibleInterval<FloatType> image) {

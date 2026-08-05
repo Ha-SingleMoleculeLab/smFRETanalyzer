@@ -194,9 +194,9 @@ public class smFRETSpotFinder implements Command {
      * only the pixels below kappa spread leaves a truncated sample whose mean sits below the true
      * background, so the estimate reads low even where there is nothing to clip but noise. Measured
      * at about 1 ADU, roughly 2.8 times the single-round prediction because four rounds compound it.
-     * That matters out of all proportion to its size: a trace is 2*pi*sigma^2 times frame minus
-     * background, so 1 ADU is 25 units of trace, and spotFilterSNR multiplies the same error by the
-     * same 2*pi*sigma^2 while the signal it is compared against grows only as sigma. The result was
+     * That matters out of all proportion to its size: a trace is 4*pi*sigma^2 times frame minus
+     * background, so 1 ADU is 50 units of trace, and spotFilterSNR scales the same error by its own
+     * 2*pi*sigma^2 while the signal it is compared against grows only as sigma. The result was
      * an SNR that climbed with spot size - +15% from sigma 1 to 3 at fixed true significance, and
      * +46% at fixed molecular brightness - so spotThreshold silently meant something different on
      * every movie. Correcting the level each round rather than once at the end is what keeps the
@@ -204,8 +204,8 @@ public class smFRETSpotFinder implements Command {
      *
      * The estimate is returned as float whatever the input was. It used to be rounded back into
      * the input's type, which on an 8 bit movie meant the background was quantized to whole ADU -
-     * and since a trace is 2*pi*sigma^2 times the difference between the frame and the background,
-     * one ADU there is 25 units of trace. That quantization was carrying about 0.3 ADU of rounding
+     * and since a trace is 4*pi*sigma^2 times the difference between the frame and the background,
+     * one ADU there is 50 units of trace. That quantization was carrying about 0.3 ADU of rounding
      * noise into every measurement, and it made any small disagreement in the estimate land as a
      * full step rather than a small one.
      *
@@ -1061,10 +1061,21 @@ public class smFRETSpotFinder implements Command {
         Shared bgSmooth = new Shared(background.width, background.height);
         gauss(spotSigma, Views.extendMirrorSingle(background.img), bgSmooth.img);
 
-        // In order to calculate the SNR integrated over the spot we need the integrated magnitude
-        // of the spot. We multiply by norm because blurGaussian() uses a normalized Gaussian when
-        // for our purposes a unit height Gaussian would have been the correct thing to use.
-        double norm = 2.0*Math.PI*spotSigma*spotSigma;
+        // The integrated magnitude of the spot, recovered from the peak of the smoothed image.
+        // gauss() convolves with a normalized Gaussian, so a spot carrying N photons at the size
+        // we are measuring at leaves N / (4 pi spotSigma^2) at its centre - the spot's width and
+        // the kernel's add in quadrature - and this is the factor that gets N back.
+        //
+        // This was 2 pi spotSigma^2, which converts a normalized Gaussian to a unit height one but
+        // leaves the width of the spot itself out of the quadrature sum, so it recovered N/2 and
+        // took the noise term from an area half the right size. The ratio of the two was short of
+        // the true matched filter significance by exactly sqrt(2); with this factor the number
+        // reported here *is* that significance, so spotThreshold now reads in real sigma.
+        //
+        // Consequence: every SNR is sqrt(2) larger than it used to be, so a given spotThreshold
+        // admits more spots than the same number did before. 6 now means 6 sigma, where it used
+        // to mean 8.49.
+        double norm = 4.0*Math.PI*spotSigma*spotSigma;
         for (int i = 0; i < spots.length; i++) {
             System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
 

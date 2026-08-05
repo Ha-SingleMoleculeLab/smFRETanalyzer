@@ -83,6 +83,10 @@ Nothing is written unless you ask for it:
 * <image_name>_histogram.csv - The bin centers and counts of the displayed histogram, via 'Save CSV'.
 * <image_name>_histogram.png - The displayed plot, titled with the H5 file name so that a saved plot can be identified on its own, via 'Save PNG'.
 
+## Input requirements ##
+
+All three analysis plugins require **8, 16 or 32 bit grayscale** images and refuse anything else, since they assume one intensity per pixel. RGB and colour-indexed images are rejected with a message rather than measured. An 8 bit image carrying a colour lookup table is also refused, because its values may be palette indices; if they really are intensities, clear the table with `Image > Lookup Tables > Grays`.
+
 ## Dependencies ##
 
 * [TurboReg](https://imagej.net/plugins/turboreg)

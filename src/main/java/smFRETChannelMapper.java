@@ -119,6 +119,59 @@ public class smFRETChannelMapper implements Command {
     }
 
     /**
+     * Reject anything that is not single channel grayscale, before it can be measured.
+     *
+     * Every stage here assumes one number per pixel: the halves are added, the background is
+     * subtracted, intensities are read at spot positions. An RGB image packs three channels into
+     * one int, and an indexed colour image stores palette entries rather than intensities, so in
+     * both cases the arithmetic would run and produce numbers that mean nothing.
+     *
+     * The image type is not enough on its own. A colour indexed PNG or GIF opens through
+     * ImagePlus as GRAY8 rather than COLOR_256 - checked, on files written for the purpose - and
+     * only the processor's colour lookup table gives it away. So 8 bit images are additionally
+     * required not to carry one.
+     *
+     * That test is deliberately not applied above 8 bits. A 16 or 32 bit image cannot be palette
+     * indexed, so a colour lookup table there is a display choice over real intensities and no
+     * reason to refuse the image. It does mean an 8 bit image with a display LUT is refused
+     * although its values are fine; that direction of mistake is the recoverable one, since the
+     * message says how to clear it, whereas the other silently measures palette indices.
+     */
+    static void requireGrayscale(ImagePlus image, String description) {
+        if ((image == null) || (image.getProcessor() == null)) {
+            throw new smFRETAnalysisException("Error: could not read " + description);
+        }
+
+        int type = image.getType();
+        if ((type == ImagePlus.GRAY16) || (type == ImagePlus.GRAY32)) {
+            return;
+        }
+        if ((type == ImagePlus.GRAY8) && !image.getProcessor().isColorLut()) {
+            return;
+        }
+
+        String actual;
+        String remedy = " Convert it with Image > Type before running the analysis.";
+        if (type == ImagePlus.COLOR_RGB) {
+            actual = "an RGB colour image";
+        }
+        else if (type == ImagePlus.GRAY8) {
+            actual = "8 bit with a colour lookup table, so its values may be palette indices"
+                    + " rather than intensities";
+            remedy = " If the values really are intensities, clear the table with"
+                    + " Image > Lookup Tables > Grays and run again.";
+        }
+        else if (type == ImagePlus.COLOR_256) {
+            actual = "an 8-bit indexed colour image";
+        }
+        else {
+            actual = "of an unsupported type (" + type + ")";
+        }
+        throw new smFRETAnalysisException("Error: " + description + " is " + actual
+                + ". This plugin needs 8, 16 or 32 bit grayscale." + remedy);
+    }
+
+    /**
      * Round a float result back into an ImageJ1 processor of the given depth.
      *
      * The arithmetic is ImageJ1's own float conversion - add a half and truncate, clamping at the
@@ -406,13 +459,11 @@ public class smFRETChannelMapper implements Command {
             //Opener sourceOpener = new Opener();
             //ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
             ImagePlus inputImage = new ImagePlus(inputImageName.toString());
+            requireGrayscale(inputImage, "the mapping image " + inputImageName);
 
             log.info("starting channel mapping " + inputImage.getHeight() + " " + inputImage.getWidth());
 
             // Calculate average image.
-            //
-            // FIXME: Block or possibly handle RGB images.
-            //
             log.info("calculating average image and splitting - " + inputImage.getNSlices() + " slices");
             ImagePlus averageImage = averageImagePlus(inputImage, startSlice, endSlice);
 

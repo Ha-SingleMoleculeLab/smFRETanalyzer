@@ -51,7 +51,7 @@ public class smFRETTraceHistogram implements Command {
     private static final int TYPE_TOTAL = 3;
     private static final String[] TYPE_NAMES = {"FRET efficiency", "Donor (target)", "Acceptor (source)", "Total (D+A)"};
 
-    // Quantity the intensity threshold is applied to. These are mutually exclusive, so they are a
+    // Quantity the intensity range is applied to. These are mutually exclusive, so they are a
     // combo box beside a single slider rather than one slider each.
     private static final int FILTER_TOTAL = 0;
     private static final int FILTER_DONOR = 1;
@@ -70,7 +70,7 @@ public class smFRETTraceHistogram implements Command {
     private final double[] filterMin = new double[FILTER_NAMES.length];
     private RangeSlider frameRangeSlider;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
-    private JSlider minValueSlider;
+    private RangeSlider valueRangeSlider;
     private int nFrames = 0;
     private int nSpots = 0;
     private HistogramPanel plotPanel;
@@ -91,7 +91,7 @@ public class smFRETTraceHistogram implements Command {
         int maxCount;
         int nOutside;       // Traces dropped for falling outside [lo,hi].
         int nPoints;        // Traces actually binned.
-        int nSpotsUsed;     // Traces passing the intensity threshold.
+        int nSpotsUsed;     // Traces inside the intensity range.
         String valueLabel;
     }
 
@@ -100,7 +100,7 @@ public class smFRETTraceHistogram implements Command {
      * directly so that the binning can be exercised without a GUI.
      */
     Histogram computeHistogram(int type, int firstFrame, int lastFrame,
-                               int filterType, double minValue, int nBins) {
+                               int filterType, double minValue, double maxValue, int nBins) {
 
         // One point per trace, the average over the selected interval. For FRET the donor and
         // acceptor are averaged first and the ratio taken from those averages - averaging the
@@ -114,6 +114,7 @@ public class smFRETTraceHistogram implements Command {
             double donorSum = 0.0;
             double acceptorSum = 0.0;
             double lowestFrameValue = Double.MAX_VALUE;
+            double highestFrameValue = -Double.MAX_VALUE;
             for (int t = firstFrame - 1; t < lastFrame; t++) {
                 double frameDonor = targetTraces[i][t];
                 double frameAcceptor = sourceTraces[i][t];
@@ -125,12 +126,17 @@ public class smFRETTraceHistogram implements Command {
                 if (frameValue < lowestFrameValue) {
                     lowestFrameValue = frameValue;
                 }
+                if (frameValue > highestFrameValue) {
+                    highestFrameValue = frameValue;
+                }
             }
 
-            // The whole trace goes if any single frame in the interval is below the threshold, so
-            // a molecule that bleaches part way through contributes nothing rather than a diluted
-            // average.
-            if (lowestFrameValue < minValue) {
+            // The whole trace goes if any single frame in the interval falls outside the range,
+            // so a molecule that bleaches part way through contributes nothing rather than a
+            // diluted average. The maximum works the same way by design, which makes it strict:
+            // one bright frame is enough to drop a trace. That is what catches an aggregate, and
+            // it also means a single spike will do it.
+            if ((lowestFrameValue < minValue) || (highestFrameValue > maxValue)) {
                 continue;
             }
 
@@ -218,7 +224,7 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
-     * The intensity the threshold slider is currently applied to.
+     * The intensity the range slider is currently applied to.
      */
     private static double filterValue(int filterType, double donor, double acceptor, double total) {
         if (filterType == FILTER_DONOR) {
@@ -679,7 +685,7 @@ public class smFRETTraceHistogram implements Command {
         nSpots = targetTraces.length;
         nFrames = Math.min(targetTraces[0].length, sourceTraces[0].length);
 
-        // Range of each quantity the threshold can be applied to, this sets the slider limits.
+        // Range of each quantity the range slider can be applied to, this sets its limits.
         for (int f = 0; f < FILTER_NAMES.length; f++) {
             filterMin[f] = Double.MAX_VALUE;
             filterMax[f] = -Double.MAX_VALUE;
@@ -739,7 +745,8 @@ public class smFRETTraceHistogram implements Command {
         try (PrintWriter writer = new PrintWriter(chooser.getSelectedFile())) {
             writer.println("# " + result.valueLabel + " from " + h5File);
             writer.println("# frames " + frameRangeSlider.getLow() + "-" + frameRangeSlider.getHigh()
-                    + ", min " + FILTER_NAMES[filterCombo.getSelectedIndex()] + " " + minValueSlider.getValue()
+                    + ", " + FILTER_NAMES[filterCombo.getSelectedIndex()] + " "
+                    + valueRangeSlider.getLow() + "-" + valueRangeSlider.getHigh()
                     + ", " + result.nPoints + " of " + result.nSpotsUsed + " traces in range");
             writer.println("bin_center,count");
             for (int i = 0; i < result.counts.length; i++) {
@@ -801,7 +808,7 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
-     * Point the frame and threshold sliders at the currently loaded traces.
+     * Point the frame and intensity sliders at the currently loaded traces.
      */
     private void resetSliderRanges() {
         boolean wasSuspended = suspendUpdates;
@@ -816,8 +823,12 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
-     * Point the threshold slider at the range of the currently selected filter quantity. The
-     * threshold starts at the low end so that nothing is hidden until the user asks for it.
+     * Point the intensity range slider at the range of the currently selected filter quantity.
+     * Both handles start at the extremes so that nothing is hidden until the user asks for it.
+     *
+     * The bounds are the per-frame minimum and maximum rather than the range of the trace
+     * averages, which is what guarantees neither end can silently exclude a trace when it is
+     * parked at its extreme.
      */
     private void resetFilterSliderRange() {
         boolean wasSuspended = suspendUpdates;
@@ -827,11 +838,8 @@ public class smFRETTraceHistogram implements Command {
             int lo = (int) Math.floor(filterMin[filterType]);
             int hi = (int) Math.ceil(filterMax[filterType]);
 
-            // Widen the maximum first, otherwise setMinimum() can drag the old maximum along with it.
-            minValueSlider.setMaximum(Math.max(hi, minValueSlider.getMaximum()));
-            minValueSlider.setMinimum(lo);
-            minValueSlider.setMaximum(hi);
-            minValueSlider.setValue(lo);
+            valueRangeSlider.setRange(lo, hi);
+            valueRangeSlider.setValues(lo, hi);
         } finally {
             suspendUpdates = wasSuspended;
         }
@@ -873,7 +881,8 @@ public class smFRETTraceHistogram implements Command {
                 frameRangeSlider.getLow(),
                 frameRangeSlider.getHigh(),
                 filterCombo.getSelectedIndex(),
-                minValueSlider.getValue(),
+                valueRangeSlider.getLow(),
+                valueRangeSlider.getHigh(),
                 binsSlider.getValue());
 
         String status = String.format("%,d of %,d traces · frames %d-%d (%,d wide)",
@@ -930,10 +939,11 @@ public class smFRETTraceHistogram implements Command {
         // default bin count is correspondingly lower.
         binsSlider = new JSlider(10, 200, 30);
         frameRangeSlider = new RangeSlider(1, Math.max(1, nFrames));
-        minValueSlider = new JSlider(0, 1, 0);
+        valueRangeSlider = new RangeSlider(0, 1);
 
-        // The threshold applies to one intensity at a time, chosen here. Switching rescales the
-        // slider to the new quantity and clears the threshold, since the ranges are unrelated.
+        // The range applies to one intensity at a time, chosen here. Switching rescales the
+        // slider to the new quantity and reopens it to the full range, since the ranges of the
+        // three quantities are unrelated.
         filterCombo = new JComboBox<>(FILTER_NAMES);
         filterCombo.setSelectedIndex(FILTER_TOTAL);
         filterCombo.addActionListener(e -> {
@@ -942,7 +952,7 @@ public class smFRETTraceHistogram implements Command {
         });
 
         JPanel filterLabelPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
-        filterLabelPanel.add(new JLabel("Min"));
+        filterLabelPanel.add(new JLabel("Range"));
         filterLabelPanel.add(filterCombo);
 
         JPanel controlPanel = new JPanel(new GridBagLayout());
@@ -950,7 +960,8 @@ public class smFRETTraceHistogram implements Command {
         addSliderRow(controlPanel, 0, new JLabel("Bins"), binsSlider, () -> Integer.toString(binsSlider.getValue()));
         addSliderRow(controlPanel, 1, new JLabel("Frames"), frameRangeSlider,
                 () -> frameRangeSlider.getLow() + "-" + frameRangeSlider.getHigh());
-        addSliderRow(controlPanel, 2, filterLabelPanel, minValueSlider, () -> Integer.toString(minValueSlider.getValue()));
+        addSliderRow(controlPanel, 2, filterLabelPanel, valueRangeSlider,
+                () -> valueRangeSlider.getLow() + "-" + valueRangeSlider.getHigh());
 
         // Status and save buttons.
         statusLabel = new JLabel(" ");

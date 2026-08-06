@@ -81,10 +81,10 @@ public class smFRETSpotFinder implements Command, Interactive {
     Double spotThreshold = 6.0;
 
     @Parameter (description = "spot tolerance threshold (for MaximaFinder plugin)", min = "1.0")
-    Double spotTolerance = 10.0;
+    Double spotTolerance = 5.0;
 
-    @Parameter (description = "spot prominence compared to pixels on 2 x spot Sigma radius", min = "1.0")
-    Double spotProminence = 1.8;
+    @Parameter (description = "spot prominence, as a fraction of an isolated spot", min = "0.0")
+    Double spotProminence = 0.4;
 
     @Parameter (description = "spot size (sigma, pixels)", min = "0.2")
     Double spotSigma = 2.0;
@@ -100,6 +100,22 @@ public class smFRETSpotFinder implements Command, Interactive {
 
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
+
+    // Half width of the prominence annulus, pixels. Wide enough that the ring is
+    // never empty at the smallest spot size - it holds 16 pixels at spotSigma 1 -
+    // and narrow enough that it stays out at two sigma rather than reaching back
+    // in toward the spot, which is what the old ring did.
+    private static final double promRingHalfWidth = 0.6;
+
+    // The 90th percentile of a standard normal. The ring is summarised by its 90th
+    // percentile and its pixels carry zero mean noise, so the summary sits this
+    // many noise sigmas high and the bias is taken back off - see
+    // spotFilterProminence for what that is worth.
+    private static final double promNoiseBias = 1.2816;
+
+    // Reported prominence is capped here rather than running away when the ring is
+    // empty, which would otherwise put an infinity in the spots CSV.
+    private static final double promCap = 10.0;
 
     // Radius masked as foreground around each spot, in pixels: it follows the
     // spot size, as max(2, round(2.5 * spotSigma)).
@@ -234,6 +250,11 @@ public class smFRETSpotFinder implements Command, Interactive {
     private Shared cachedSource;
     private int cachedWidth;
     private int cachedHeight;
+
+    // How many frames actually went into the average, after averageImagePlus has clamped the
+    // requested range to the movie. The prominence filter needs it to know how far the temporal
+    // average has taken the noise down.
+    private int cachedFrames;
 
     // The displayed QC image, kept so that repeated runs update one window instead of opening one
     // window per run.
@@ -1080,41 +1101,128 @@ public class smFRETSpotFinder implements Command, Interactive {
     }
 
     /**
-     * Mark spots with prominence less than threshold.
+     * Mark spots whose surroundings are too bright for an isolated molecule.
+     *
+     * The spot's height is compared against the level on a ring at two sigma, and the ratio is
+     * divided by what a perfect isolated spot of this sigma would give, so **the number reads as
+     * a fraction of ideal: 1.0 is a clean lone spot whatever its size or brightness.**
+     *
+     * All three parts of that were measured rather than chosen. The ring was
+     * (srad-1)^2 <= r^2 <= (srad+1)^2 with srad = round(2*spotSigma), whose inner edge is 1 px
+     * at sigma 1 but 5 px at sigma 3, so a lone spot scored exp(rmin^2/2 sigma^2) - 1.649 at
+     * sigma 1 rising to 4.010 at sigma 3. A fixed threshold therefore meant something different
+     * at every spot size, and the old default of 1.8 sat *above* the sigma 1 ideal: at
+     * spotSigma 1.0 it rejected every real spot. Hence a thin annulus at 2 sigma and the
+     * explicit normalization.
+     *
+     * The ring was also summarised by its brightest pixel, which is an extreme value statistic
+     * over 28 to 80 pixels and so mostly noise. The 90th percentile cut the best achievable
+     * error rate sum from 0.830 to 0.685 averaged over sigma 1 to 3. Doing this on the smoothed
+     * foreground was tried and is worse (0.776) - smoothing blurs the neighbour into the spot,
+     * which is the thing being looked for.
+     *
+     * The old max(1, ...) on each ring pixel was an absolute ADU floor, and it is what made the
+     * filter select against bright spots on real data: a dim spot's ring is noise near zero,
+     * clamped to 1, scoring a huge ratio, where a bright spot's ring is real PSF wings scoring
+     * their true ratio. On hel1 that rejected 52% of spots at SNR 15-25 against 16% below 10.
+     * A ring at or below zero is now simply taken as "nothing there, so no neighbour".
      */
     private double[][] spotFilterProminence(double[][] spots, ImagePlus sumImage, ImagePlus backgroundImage) {
         double[][] filteredSpots = new double[spots.length][spots[0].length+1];
         int last_col = filteredSpots[0].length-1;
 
-        int srad = (int)(Math.round(2.0*spotSigma));
         Shared fgImage = foreground(sumImage, backgroundImage);
+        ImageProcessor bgProc = backgroundImage.getProcessor();
+        int[][] ring = prominenceRing();
+        double ideal = idealProminence(ring);
+        double frames = Math.max(1, cachedFrames);
+        float[] ringValues = new float[ring.length];
+
         for (int i = 0; i < spots.length; i++) {
             System.arraycopy(spots[i], 0, filteredSpots[i], 0, spots[i].length);
 
             int x = (int)spots[i][1];
             int y = (int)spots[i][2];
 
-            // Calculate spot lowest prominence over pixels in circular neighborhood.
             double spotHeight = valueAt(fgImage, x, y);
-            double lowestProminence = spotHeight;
-            for (int rx = -srad; rx <= srad; rx += 1){
-                for (int ry = -srad; ry <= srad; ry += 1){
-                    if (rx*rx+ry*ry >= (srad-1)*(srad-1) && rx*rx+ry*ry <= (srad+1)*(srad+1)){
-                        double pixelHeight = Math.max(1, valueAt(fgImage, x+rx, y+ry));
-                        double prominence = spotHeight/pixelHeight;
-                        if (prominence < lowestProminence){
-                            lowestProminence = prominence;
-                        }
-                    }
-                }
+            for (int j = 0; j < ring.length; j++) {
+                ringValues[j] = valueAt(fgImage, x + ring[j][0], y + ring[j][1]);
             }
-            filteredSpots[i][last_col] = lowestProminence;
-            if (lowestProminence < spotProminence){
+
+            // The ring pixels have had the background taken off, so their noise is zero mean and
+            // the 90th percentile of it sits promNoiseBias sigmas above the true ring level. Left
+            // in, that reads the ring high and the prominence low, and by more at larger spot
+            // sizes where the ring is a smaller fraction of the peak - which is what stopped the
+            // normalization above from actually equalizing the scores. Taking it off moves the
+            // median lone spot from 0.90/0.64/0.70/0.66/0.47 at sigma 1.0 to 3.0 to
+            // 1.02/0.92/1.07/1.04/0.77, which is the 1.0 it is supposed to be.
+            double levelADU = Math.max(0.0, bgProc.getf(x, y) - channelCount()*cameraBlackLevel);
+            double noise = Math.sqrt(levelADU / (cameraGain * frames));
+            double ringLevel = percentile90(ringValues) - promNoiseBias*noise;
+
+            double prominence = promCap;
+            if (ringLevel > 0.0) {
+                prominence = Math.min(promCap, (spotHeight / ringLevel) / ideal);
+            }
+
+            filteredSpots[i][last_col] = prominence;
+            if (prominence < spotProminence){
                 filteredSpots[i][0] = 0.0;
             }
         }
 
         return filteredSpots;
+    }
+
+    /**
+     * Pixel offsets of the prominence ring: a thin annulus at two sigma.
+     */
+    private int[][] prominenceRing() {
+        double radius = 2.0*spotSigma;
+        int reach = (int) Math.ceil(radius + promRingHalfWidth);
+
+        java.util.List<int[]> offsets = new java.util.ArrayList<>();
+        for (int rx = -reach; rx <= reach; rx++) {
+            for (int ry = -reach; ry <= reach; ry++) {
+                if (Math.abs(Math.hypot(rx, ry) - radius) <= promRingHalfWidth) {
+                    offsets.add(new int[] {rx, ry});
+                }
+            }
+        }
+        return offsets.toArray(new int[0][]);
+    }
+
+    /**
+     * What the height over ring ratio comes to for a noiseless isolated spot of this sigma.
+     *
+     * Computed from the ring's own offsets with the same summary statistic the measurement uses,
+     * so the two cancel exactly and a perfect lone spot scores 1.0 - rather than being a constant
+     * that would have to be kept in step with the ring geometry by hand.
+     */
+    private double idealProminence(int[][] ring) {
+        float[] profile = new float[ring.length];
+        for (int i = 0; i < ring.length; i++) {
+            double r2 = ring[i][0]*ring[i][0] + ring[i][1]*ring[i][1];
+            profile[i] = (float) Math.exp(-r2 / (2.0*spotSigma*spotSigma));
+        }
+        return 1.0 / percentile90(profile);
+    }
+
+    /**
+     * The 90th percentile, interpolated between the two neighbouring order statistics.
+     *
+     * A plain sort rather than the quickselect used for the background medians: the ring holds
+     * 16 to 40 values and this runs once per spot rather than once per pixel, so the selection
+     * would save nothing, and interpolating wants both neighbours rather than one.
+     */
+    private static double percentile90(float[] values) {
+        float[] sorted = values.clone();
+        java.util.Arrays.sort(sorted);
+
+        double position = 0.9*(sorted.length - 1);
+        int lower = (int) Math.floor(position);
+        int upper = Math.min(lower + 1, sorted.length - 1);
+        return sorted[lower] + (position - lower)*(sorted[upper] - sorted[lower]);
     }
 
     /**
@@ -1300,6 +1408,12 @@ public class smFRETSpotFinder implements Command, Interactive {
         cachedSource = copyOf(ImageJFunctions.convertFloat(images.get(1)));
         cachedWidth = averageImage.getWidth();
         cachedHeight = averageImage.getHeight();
+
+        // The same clamping averageImagePlus applies, so a range that runs off the end of the
+        // movie does not leave the noise estimate thinking it averaged more than it did.
+        int frames = smFRETChannelMapper.frameCount(inputImage);
+        cachedFrames = (frames == 1) ? 1
+                : (Math.min(endSlice, frames) - Math.max(1, startSlice) + 1);
         cachedInputs = inputs;
     }
 

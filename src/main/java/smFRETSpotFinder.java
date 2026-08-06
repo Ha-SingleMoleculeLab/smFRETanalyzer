@@ -104,23 +104,28 @@ public class smFRETSpotFinder implements Command {
     // nothing new to remove.
     private static final int backgroundClipRounds = 4;
 
-    // kappa = backgroundKappaIntercept + backgroundKappaSlope * spotSigma, when
-    // backgroundKappa is left at zero. Measured by sweeping radius, kappa and
-    // smoothing against a known background over simulated aberrated Airy PSFs
-    // from sigma 1 to 3: the best kappa runs 1.25, 1.00, 1.00, 0.80, 0.60 and
-    // fits this line to an rms of 0.05.
+    // Default clipping threshold, used when backgroundKappa is left at zero. A
+    // constant, and re-derived against the current estimator by sweeping kappa
+    // from 0.4 to 10 at spot sizes 1.0 to 3.0, against a known background under
+    // a Gaussian beam, at the density of the real data - 400 spots in a channel,
+    // randomly placed, log-normal brightness. Scored on the bias of the estimate
+    // at the spot locations, since that is what gets subtracted from a trace.
     //
-    // It *falls* with spot size, which is not the obvious direction. A wider
-    // PSF spreads the same wing photons over more pixels, so the contamination
-    // is a smaller excursion above the background in each one, and catching it
-    // needs a tighter clip rather than a looser one.
-    private static final double backgroundKappaIntercept = 1.5;
-    private static final double backgroundKappaSlope = -0.3;
-
-    // Smallest derived kappa. The fit reaches 0.6 at sigma 3 and would keep
-    // going; below about half a robust sigma the clip starts removing ordinary
-    // background noise along with the spot light.
-    private static final double backgroundKappaFloor = 0.5;
+    // This used to be 1.5 - 0.3 * spotSigma, floored at 0.5. That line was fitted
+    // when the one-sided clip still biased the level downwards - see
+    // truncationConstants - so it was partly compensating for the estimator
+    // rather than describing the spots. With the bias corrected, the best kappa
+    // is *not* monotone in spot size: it runs loose at sigma 1 to 1.5, tightest
+    // near sigma 2, and back to about 1.0 to 1.3 by sigma 3, which no line fits.
+    // Aggregated over spot size the optimum is flat from about 1.0 to 1.6, and
+    // 1.3 is the best single value with or without sigma 3 included.
+    //
+    // Do not read the residual error at large spot sizes as a kappa problem. At
+    // sigma 3 the estimate reads 0.44 ADU high at every kappa, and thinning the
+    // field from 400 spots to 50 takes that to 0.03 - the clip is not what is
+    // failing there, spotMargin is, being a fixed 4 pixels where the PSF reaches
+    // three times that.
+    private static final double backgroundKappaDefault = 1.3;
 
     // Smoothing scale for the background estimate, in pixels. A constant, and
     // measured to be one: the best value sat at 12 to 16 pixels at every spot
@@ -463,25 +468,22 @@ public class smFRETSpotFinder implements Command {
     /**
      * How far above the estimate a pixel may sit before it is called spot light.
      *
-     * Derived from spotSigma unless backgroundKappa says otherwise, because it is not an
-     * independent property of the experiment - it is set by how much of a spot's light lands
-     * in the pixels the estimator is trusting, and that follows from the spot's size.
+     * A constant now, not a function of spotSigma - see backgroundKappaDefault for the sweep
+     * that says so. It used to be derived from the spot size on the reasoning that the clip has
+     * to catch the wings of whatever PSF it is given; that is true, but it is not what the old
+     * line was measuring, because it was fitted while the clip still biased the level downwards
+     * and so was trading contamination against a bias that no longer exists.
      *
-     * Setting backgroundKappa to anything above zero overrides this. That escape hatch is
-     * there because the relationship was measured on simulated data with a smooth Gaussian
-     * illumination profile, and the one real movie it has been checked against wanted a looser
-     * clip than the line predicts - 1.8 against 0.9. Two things could explain that and they
-     * have not been separated: that movie is analysed with a spotsigma of 2.0 while its PSF
-     * actually fits at 1.36, so the input to the formula is wrong there; and a structured
-     * illumination profile has real background variation that hard clipping would eat.
+     * Setting backgroundKappa above zero still overrides it. The escape hatch stays because the
+     * sweep behind the default assumes a smooth Gaussian beam, and a real illumination profile
+     * can have structure at scales a hard clip would eat. The example long movie wanted 1.8,
+     * which is much closer to this constant than to the 0.93 the old line gave it.
      */
     public double clippingThreshold() {
         if (backgroundKappa > 0.0) {
             return backgroundKappa;
         }
-        return Math.max(
-            backgroundKappaFloor,
-            backgroundKappaIntercept + backgroundKappaSlope * spotSigma);
+        return backgroundKappaDefault;
     }
 
     /**

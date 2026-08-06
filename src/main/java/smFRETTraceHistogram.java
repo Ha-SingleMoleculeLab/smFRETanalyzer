@@ -63,13 +63,19 @@ public class smFRETTraceHistogram implements Command {
     private static final double FRET_MIN = -0.2;
     private static final double FRET_MAX = 1.2;
 
+    // The traces as smFRETAnalyzer wrote them, no corrections applied.
+    private static final Corrections NO_CORRECTIONS = new Corrections(0.0, 0.0, 0.0);
+
     // Member variables.
+    private JSpinner acceptorBaselineSpinner;
     private JSlider binsSlider;
+    private JSpinner donorBaselineSpinner;
     private JComboBox<String> filterCombo;
     private final double[] filterMax = new double[FILTER_NAMES.length];
     private final double[] filterMin = new double[FILTER_NAMES.length];
     private RangeSlider frameRangeSlider;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
+    private JSpinner leakageSpinner;
     private RangeSlider valueRangeSlider;
     private int nFrames = 0;
     private int nSpots = 0;
@@ -96,11 +102,57 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
+     * The per frame corrections applied to the traces before anything is measured from them.
+     *
+     * Both baselines are *subtracted*, so a negative value adds one. Leakage is the fraction of
+     * the donor that appears in the acceptor channel, and it is taken off the acceptor using the
+     * *baseline corrected* donor: leakage is a fraction of real donor emission, and an offset
+     * that survived into the trace is not donor emission.
+     *
+     * Grouped rather than passed as three more doubles because computeHistogram() already takes
+     * seven positional arguments, and three unlabelled doubles in a row are easy to transpose.
+     */
+    static class Corrections {
+
+        final double acceptorBaseline;
+        final double donorBaseline;
+        final double leakage;
+
+        Corrections(double donorBaseline, double acceptorBaseline, double leakage) {
+            this.acceptorBaseline = acceptorBaseline;
+            this.donorBaseline = donorBaseline;
+            this.leakage = leakage;
+        }
+
+        /**
+         * Takes the *corrected* donor rather than the raw one, both because that is the quantity
+         * the leakage is a fraction of and so that callers do not correct the donor twice.
+         */
+        double correctAcceptor(double rawAcceptor, double correctedDonor) {
+            return rawAcceptor - acceptorBaseline - leakage * correctedDonor;
+        }
+
+        double correctDonor(double rawDonor) {
+            return rawDonor - donorBaseline;
+        }
+
+        String describe() {
+            return "baseline D " + compact(donorBaseline) + " / A " + compact(acceptorBaseline)
+                    + ", leakage " + compact(leakage);
+        }
+
+        boolean isIdentity() {
+            return (acceptorBaseline == 0.0) && (donorBaseline == 0.0) && (leakage == 0.0);
+        }
+    }
+
+    /**
      * Bin the loaded traces. Takes its settings as arguments rather than reading the controls
      * directly so that the binning can be exercised without a GUI.
      */
     Histogram computeHistogram(int type, int firstFrame, int lastFrame,
-                               int filterType, double minValue, double maxValue, int nBins) {
+                               int filterType, double minValue, double maxValue, int nBins,
+                               Corrections corrections) {
 
         // One point per trace, the average over the selected interval. For FRET the donor and
         // acceptor are averaged first and the ratio taken from those averages - averaging the
@@ -116,8 +168,8 @@ public class smFRETTraceHistogram implements Command {
             double lowestFrameValue = Double.MAX_VALUE;
             double highestFrameValue = -Double.MAX_VALUE;
             for (int t = firstFrame - 1; t < lastFrame; t++) {
-                double frameDonor = targetTraces[i][t];
-                double frameAcceptor = sourceTraces[i][t];
+                double frameDonor = corrections.correctDonor(targetTraces[i][t]);
+                double frameAcceptor = corrections.correctAcceptor(sourceTraces[i][t], frameDonor);
                 donorSum += frameDonor;
                 acceptorSum += frameAcceptor;
 
@@ -666,6 +718,21 @@ public class smFRETTraceHistogram implements Command {
     }
 
     /**
+     * A correction value for the status line and the CSV header, without the trailing zeroes.
+     *
+     * Not DecimalFormat, which would put a comma where a locale wants a decimal separator and
+     * make the CSV header lie. %f always emits a decimal point, so stripping trailing zeroes
+     * cannot eat a digit of an integer the way it would on a bare "100".
+     */
+    private static String compact(double value) {
+        String text = String.format(java.util.Locale.US, "%.6f", value);
+        while (text.endsWith("0")) {
+            text = text.substring(0, text.length() - 1);
+        }
+        return text.endsWith(".") ? text.substring(0, text.length() - 1) : text;
+    }
+
+    /**
      * Load the trace matrices from an smFRETAnalyzer H5 file.
      */
     void loadTraces(File file) {
@@ -684,16 +751,27 @@ public class smFRETTraceHistogram implements Command {
 
         nSpots = targetTraces.length;
         nFrames = Math.min(targetTraces[0].length, sourceTraces[0].length);
+        computeFilterBounds(corrections());
 
-        // Range of each quantity the range slider can be applied to, this sets its limits.
+        log.info("loaded " + nSpots + " traces of " + nFrames + " frames from " + file);
+    }
+
+    /**
+     * Range of each quantity the intensity range slider can be applied to, which sets its limits.
+     *
+     * Measured on the corrected traces, so it has to be redone whenever a correction changes -
+     * subtracting a baseline moves the data out from under bounds taken on the raw traces, and an
+     * end of the slider parked at a stale extreme would then silently exclude traces.
+     */
+    private void computeFilterBounds(Corrections corrections) {
         for (int f = 0; f < FILTER_NAMES.length; f++) {
             filterMin[f] = Double.MAX_VALUE;
             filterMax[f] = -Double.MAX_VALUE;
         }
         for (int i = 0; i < nSpots; i++) {
             for (int t = 0; t < nFrames; t++) {
-                double donor = targetTraces[i][t];
-                double acceptor = sourceTraces[i][t];
+                double donor = corrections.correctDonor(targetTraces[i][t]);
+                double acceptor = corrections.correctAcceptor(sourceTraces[i][t], donor);
                 for (int f = 0; f < FILTER_NAMES.length; f++) {
                     double value = filterValue(f, donor, acceptor, donor + acceptor);
                     if (value < filterMin[f]) { filterMin[f] = value; }
@@ -706,8 +784,34 @@ public class smFRETTraceHistogram implements Command {
                 filterMax[f] = filterMin[f] + 1.0;
             }
         }
+    }
 
-        log.info("loaded " + nSpots + " traces of " + nFrames + " frames from " + file);
+    /**
+     * The corrections the spinboxes currently ask for.
+     *
+     * loadTraces() runs before the window is built, and again from Browse... after it is, so this
+     * has to answer in both states - uncorrected before there are controls to read.
+     */
+    private Corrections corrections() {
+        if (donorBaselineSpinner == null) {
+            return NO_CORRECTIONS;
+        }
+        return new Corrections(((Number) donorBaselineSpinner.getValue()).doubleValue(),
+                ((Number) acceptorBaselineSpinner.getValue()).doubleValue(),
+                ((Number) leakageSpinner.getValue()).doubleValue());
+    }
+
+    /**
+     * A correction changed: the traces have moved, so the intensity range slider is rescaled to
+     * them and reopened, exactly as switching the quantity it applies to already does.
+     */
+    private void onCorrectionChanged() {
+        if (suspendUpdates) {
+            return;
+        }
+        computeFilterBounds(corrections());
+        resetFilterSliderRange();
+        update();
     }
 
     /**
@@ -748,6 +852,10 @@ public class smFRETTraceHistogram implements Command {
                     + ", " + FILTER_NAMES[filterCombo.getSelectedIndex()] + " "
                     + valueRangeSlider.getLow() + "-" + valueRangeSlider.getHigh()
                     + ", " + result.nPoints + " of " + result.nSpotsUsed + " traces in range");
+
+            // Written even when they are all zero, so that a saved histogram says what was done
+            // to the traces rather than leaving it to be inferred from the absence of a line.
+            writer.println("# corrections: " + corrections().describe());
             writer.println("bin_center,count");
             for (int i = 0; i < result.counts.length; i++) {
                 writer.println((result.lo + (i + 0.5) * result.binWidth) + "," + result.counts[i]);
@@ -877,13 +985,15 @@ public class smFRETTraceHistogram implements Command {
             return;
         }
 
+        Corrections corrections = corrections();
         result = computeHistogram(selectedType(),
                 frameRangeSlider.getLow(),
                 frameRangeSlider.getHigh(),
                 filterCombo.getSelectedIndex(),
                 valueRangeSlider.getLow(),
                 valueRangeSlider.getHigh(),
-                binsSlider.getValue());
+                binsSlider.getValue(),
+                corrections);
 
         String status = String.format("%,d of %,d traces · frames %d-%d (%,d wide)",
                 result.nSpotsUsed, nSpots,
@@ -891,6 +1001,12 @@ public class smFRETTraceHistogram implements Command {
                 frameRangeSlider.getHigh() - frameRangeSlider.getLow() + 1);
         if (result.nOutside > 0) {
             status += String.format(" · %,d outside range", result.nOutside);
+        }
+
+        // Only when they are doing something, so that the common uncorrected case reads as it
+        // did before rather than carrying three zeroes around.
+        if (!corrections.isIdentity()) {
+            status += " · " + corrections.describe();
         }
         statusLabel.setText(status);
 
@@ -955,6 +1071,27 @@ public class smFRETTraceHistogram implements Command {
         filterLabelPanel.add(new JLabel("Range"));
         filterLabelPanel.add(filterCombo);
 
+        // Corrections. Spin boxes rather than sliders because these are set to a measured number -
+        // a baseline read off a blank region, a leakage measured on a donor only sample - rather
+        // than dialled in by eye, and typing the number is the point.
+        donorBaselineSpinner = correctionSpinner(new SpinnerNumberModel(0.0, -1.0e9, 1.0e9, 1.0), "0.###",
+                "Subtracted from every donor value. Negative adds one.");
+        acceptorBaselineSpinner = correctionSpinner(new SpinnerNumberModel(0.0, -1.0e9, 1.0e9, 1.0), "0.###",
+                "Subtracted from every acceptor value. Negative adds one.");
+        // Four decimals rather than the baselines' three: a leakage coefficient is a small
+        // fraction, and the editor commits what it displays, so the format is the precision.
+        leakageSpinner = correctionSpinner(new SpinnerNumberModel(0.0, 0.0, 1.0, 0.01), "0.####",
+                "Fraction of the baseline corrected donor removed from the acceptor.");
+
+        JPanel correctionPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 1));
+        correctionPanel.add(new JLabel("Baseline   donor"));
+        correctionPanel.add(donorBaselineSpinner);
+        correctionPanel.add(new JLabel("acceptor"));
+        correctionPanel.add(acceptorBaselineSpinner);
+        correctionPanel.add(Box.createHorizontalStrut(14));
+        correctionPanel.add(new JLabel("Donor leakage"));
+        correctionPanel.add(leakageSpinner);
+
         JPanel controlPanel = new JPanel(new GridBagLayout());
         controlPanel.setBorder(new EmptyBorder(4, 8, 4, 8));
         addSliderRow(controlPanel, 0, new JLabel("Bins"), binsSlider, () -> Integer.toString(binsSlider.getValue()));
@@ -962,6 +1099,14 @@ public class smFRETTraceHistogram implements Command {
                 () -> frameRangeSlider.getLow() + "-" + frameRangeSlider.getHigh());
         addSliderRow(controlPanel, 2, filterLabelPanel, valueRangeSlider,
                 () -> valueRangeSlider.getLow() + "-" + valueRangeSlider.getHigh());
+
+        GridBagConstraints correctionConstraints = new GridBagConstraints();
+        correctionConstraints.anchor = GridBagConstraints.WEST;
+        correctionConstraints.gridwidth = 3;
+        correctionConstraints.gridx = 0;
+        correctionConstraints.gridy = 3;
+        correctionConstraints.insets = new Insets(1, 0, 1, 6);
+        controlPanel.add(correctionPanel, correctionConstraints);
 
         // Status and save buttons.
         statusLabel = new JLabel(" ");
@@ -993,6 +1138,19 @@ public class smFRETTraceHistogram implements Command {
         frame.pack();
         frame.setLocationRelativeTo(null);
         frame.setVisible(true);
+    }
+
+    /**
+     * showWindow() helper, one correction spin box.
+     */
+    private JSpinner correctionSpinner(SpinnerNumberModel model, String format, String tip) {
+        JSpinner spinner = new JSpinner(model);
+        JSpinner.NumberEditor editor = new JSpinner.NumberEditor(spinner, format);
+        editor.getTextField().setColumns(6);
+        spinner.setEditor(editor);
+        spinner.setToolTipText(tip);
+        spinner.addChangeListener(e -> onCorrectionChanged());
+        return spinner;
     }
 
     /**

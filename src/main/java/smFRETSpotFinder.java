@@ -101,34 +101,40 @@ public class smFRETSpotFinder implements Command, Interactive {
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
 
-    // Radius masked as foreground around each spot, in pixels.
+    // Radius masked as foreground around each spot, in pixels: it follows the
+    // spot size, as max(2, round(2.5 * spotSigma)).
     //
-    // A fixed 4 because a sweep against a known background over simulated PSFs
-    // from sigma 1 to 3 found the choice barely mattered - anything from 2 to 6
-    // within 11% at any spot size, and 4 within 2% of the best everywhere. The
-    // reasoning was that the clip in backgroundEstimate finds contaminated
-    // pixels for itself, so the mask is no longer the thing standing between
-    // spot light and the estimate.
-    //
-    // TREAT THAT RESULT AS STALE. It was measured against the estimator before
+    // It was a fixed 4, justified by a sweep that found anything from 2 to 6
+    // within 11% at any spot size. That sweep ran against the estimator before
     // the one-sided clip's downward bias was corrected - see truncationConstants
-    // - and that bias was partly cancelling the very contamination the mask is
-    // supposed to stop, so the mask looked less important than it is. It was
-    // also measured on a sparser field than the real data.
+    // - and that bias was partly cancelling the contamination this mask exists
+    // to stop, so the mask looked less important than it is. It also ran on a
+    // sparser field than real data.
     //
-    // Re-measured at the density of the real data, 400 spots in a channel, the
-    // background at sigma 3 reads 0.44 ADU high at *every* kappa from 0.4 to 10,
-    // which is about 50 units of trace and systematic. Thinning the field to
-    // 200, 100 and 50 spots takes it to 0.17, 0.06 and 0.03. Density moves it
-    // 13 times where the whole kappa range moves it by 0.15, so this is spot
-    // light reaching past the mask rather than a clipping failure: 4 pixels is
-    // 1.33 sigma at spotSigma 3, against a PSF still carrying signal out to
-    // 3 sigma = 9 pixels.
+    // Re-swept from 2 to 10 pixels at spot sizes 1.0 to 3.0, at two densities,
+    // scored on the bias of the background estimate at the spot locations since
+    // that is what gets subtracted from a trace. The best margin tracks the spot
+    // size cleanly, unlike backgroundKappa: at 400 spots in a channel it runs
+    // 2, 3, 5, 8 and beyond 10 as sigma goes 1.0 to 3.0.
     //
-    // Making this follow spotSigma is the obvious candidate and is NOT YET DONE.
-    // At spotSigma 2 and below the error is small enough that 4 is defensible,
-    // which is why it has not been rushed.
-    private static final int spotMargin = 4;
+    // 2.5 sigma rather than the 3 sigma a PSF actually reaches, because masking
+    // is not free - every masked pixel is one the estimator cannot use, and at
+    // 400 spots a radius of 8 already covers most of the field. That shows up as
+    // a genuine turning point: at sigma 3 the error bottoms at a margin of 8
+    // (rms 0.278) and gets worse by 10 (0.288) even though the bias is still
+    // falling. Against the fixed 4, this cuts the bias over the sigma range from
+    // 0.225 to 0.098 ADU at 400 spots and from 0.066 to 0.030 at 150 - worth
+    // roughly 15 units of trace at sigma 3, systematically.
+    //
+    // A scale of 2.0 was the alternative and is marginally better on the sparse
+    // field, but half as good on the crowded one, and crowded is what the real
+    // data is. The floor of 2 only matters below spotSigma 0.6.
+    private static final double spotMarginScale = 2.5;
+    private static final int spotMarginFloor = 2;
+
+    private int spotMargin() {
+        return Math.max(spotMarginFloor, (int) Math.round(spotMarginScale * spotSigma));
+    }
 
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
     Double backgroundKappa = 0.0;
@@ -168,10 +174,11 @@ public class smFRETSpotFinder implements Command, Interactive {
     // 1.3 is the best single value with or without sigma 3 included.
     //
     // Do not read the residual error at large spot sizes as a kappa problem. At
-    // sigma 3 the estimate reads 0.44 ADU high at every kappa, and thinning the
-    // field from 400 spots to 50 takes that to 0.03 - the clip is not what is
-    // failing there, spotMargin is, being a fixed 4 pixels where the PSF reaches
-    // three times that.
+    // sigma 3 the estimate read 0.44 ADU high at every kappa, and thinning the
+    // field from 400 spots to 50 took that to 0.03 - the clip was not what was
+    // failing there, spotMargin was, being a fixed 4 pixels where the PSF
+    // reaches three times that. spotMargin follows spotSigma now, which takes
+    // that residual down but does not abolish it.
     private static final double backgroundKappaDefault = 1.3;
 
     // Smoothing scale for the background estimate, in pixels. A constant, and
@@ -180,7 +187,7 @@ public class smFRETSpotFinder implements Command, Interactive {
     // It is a property of how fast the illumination varies, which is a fact
     // about the microscope rather than about the spots.
     //
-    // This used to be 2 * spotMargin, which with the default margin gave 8 and
+    // This used to be 2 * spotMargin, which at the default spot size gave 8 and
     // cost 40 to 60% more error than 14 at every sigma above 1.
     //
     // If this is ever changed, backgroundDecimation has to be revisited with it -
@@ -286,7 +293,8 @@ public class smFRETSpotFinder implements Command, Interactive {
      *   - the masking radius hardly matters. Anything from 2 to 6 pixels costs at most 11% more
      *     error at any sigma, and 4 is within 2% everywhere. That is this estimator working as
      *     intended: once the clip finds the contaminated pixels itself, there is little left for
-     *     the mask to do, so spotMargin no longer needs to be chosen with care;
+     *     the mask to do. That held while the clip was biased; with the bias corrected the
+     *     mask matters again at large spot sizes, which is why spotMargin follows spotSigma;
      *   - the threshold is sharp, and one grid step away costs 15 to 40%. It is worth deriving;
      *   - the smoothing scale showed no trend against sigma at all. It is set by how fast the
      *     illumination varies, not by the spots.
@@ -1391,7 +1399,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             log.info("after spot proximity filter " + countGoodSpots(filteredSpots));
 
             // filter low SNR spots.
-            backgroundMask = createSpotsNeighborhoodMask(allSpots, cachedWidth/2, cachedHeight, spotMargin);
+            backgroundMask = createSpotsNeighborhoodMask(allSpots, cachedWidth/2, cachedHeight, spotMargin());
             backgroundMask = neighborhoodMaskToBackgroundMask(backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
@@ -1402,7 +1410,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             log.info("after prominence filter " + countGoodSpots(filteredSpots));
 
             // display as overlay on sum image.
-            Overlay ov = getSpotOverlay(filteredSpots, spotMargin, Color.GREEN);
+            Overlay ov = getSpotOverlay(filteredSpots, spotMargin(), Color.GREEN);
             sumImage.setOverlay(ov);
 
             // One window, updated in place. Showing a new one per run would leave a window per
@@ -1435,7 +1443,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             mapping.put("masks file", masksFileName);
             mapping.put("root name", saveRootName);
             mapping.put("spots file", spotsFileName);
-            mapping.put("spot margin", spotMargin);
+            mapping.put("spot margin", spotMargin());
             mapping.put("spot prominence", spotProminence);
             mapping.put("spot sigma", spotSigma);
             mapping.put("spot spacing", spotSpacing);

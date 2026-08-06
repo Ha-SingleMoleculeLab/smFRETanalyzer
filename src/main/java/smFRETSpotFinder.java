@@ -101,14 +101,33 @@ public class smFRETSpotFinder implements Command, Interactive {
     @Parameter (description = "margin around the edge of the channels (pixels)", min = "1")
     Integer edgeMargin = 5;
 
-    // Radius masked as foreground around each spot, in pixels. Not adjustable,
-    // because sweeping it against a known background over simulated PSFs from
-    // sigma 1 to 3 found the choice barely matters: anything from 2 to 6 costs
-    // at most 11% more error at any spot size, and 4 is within 2% of the best
-    // everywhere. That is a consequence of how the background is estimated -
-    // the clip finds contaminated pixels for itself, so the mask is no longer
-    // the thing standing between spot light and the estimate, and there is
-    // little left for a careful choice to buy.
+    // Radius masked as foreground around each spot, in pixels.
+    //
+    // A fixed 4 because a sweep against a known background over simulated PSFs
+    // from sigma 1 to 3 found the choice barely mattered - anything from 2 to 6
+    // within 11% at any spot size, and 4 within 2% of the best everywhere. The
+    // reasoning was that the clip in backgroundEstimate finds contaminated
+    // pixels for itself, so the mask is no longer the thing standing between
+    // spot light and the estimate.
+    //
+    // TREAT THAT RESULT AS STALE. It was measured against the estimator before
+    // the one-sided clip's downward bias was corrected - see truncationConstants
+    // - and that bias was partly cancelling the very contamination the mask is
+    // supposed to stop, so the mask looked less important than it is. It was
+    // also measured on a sparser field than the real data.
+    //
+    // Re-measured at the density of the real data, 400 spots in a channel, the
+    // background at sigma 3 reads 0.44 ADU high at *every* kappa from 0.4 to 10,
+    // which is about 50 units of trace and systematic. Thinning the field to
+    // 200, 100 and 50 spots takes it to 0.17, 0.06 and 0.03. Density moves it
+    // 13 times where the whole kappa range moves it by 0.15, so this is spot
+    // light reaching past the mask rather than a clipping failure: 4 pixels is
+    // 1.33 sigma at spotSigma 3, against a PSF still carrying signal out to
+    // 3 sigma = 9 pixels.
+    //
+    // Making this follow spotSigma is the obvious candidate and is NOT YET DONE.
+    // At spotSigma 2 and below the error is small enough that 4 is defensible,
+    // which is why it has not been rushed.
     private static final int spotMargin = 4;
 
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")

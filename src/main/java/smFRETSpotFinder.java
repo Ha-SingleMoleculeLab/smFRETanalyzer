@@ -114,6 +114,15 @@ public class smFRETSpotFinder implements Command, Interactive {
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
     Double backgroundKappa = 0.0;
 
+    // Which image spots are found in. "sum" is what this always did, and stays the default.
+    //
+    // Short values rather than "donor/target", so that a macro can say spotchannel=donor without
+    // having to bracket-quote it.
+    @Parameter (description = "channel to find spots in: the donor/target half, the acceptor/source"
+                              + " half, or the two added together",
+                label = "Spot channel", choices = {"sum", "donor", "acceptor"})
+    String spotChannel = "sum";
+
     @Parameter (label = "Find spots", description = "run spot finding with the settings above",
                 callback = "findSpots")
     private Button findSpotsButton;
@@ -195,7 +204,8 @@ public class smFRETSpotFinder implements Command, Interactive {
     // startSlice and endSlice are in the key because they choose which frames are averaged: change
     // either and the summed image is a different image, so the whole prefix has to be redone.
     private String cachedInputs;
-    private Shared cachedSum;
+    private Shared cachedTarget;
+    private Shared cachedSource;
     private int cachedWidth;
     private int cachedHeight;
 
@@ -1083,7 +1093,9 @@ public class smFRETSpotFinder implements Command, Interactive {
     /**
      * Mark spots with estimated SNR less than threshold.
      *
-     * The factor of two for the camera black level is because we added the two channels together.
+     * The camera black level is multiplied by how many channels went into the image spots are
+     * being found in - two for the sum, one for a single channel - since that is how many black
+     * levels the background carries.
      */
     private double[][] spotFilterSNR(double[][] spots, ImagePlus sumImage, ImagePlus backgroundImage){
         double[][] filteredSpots = new double[spots.length][spots[0].length+1];
@@ -1120,7 +1132,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             int y = (int)spots[i][2];
 
             double fg = norm*cameraGain*valueAt(fgSmooth, x, y);
-            double bg = norm*cameraGain*(valueAt(bgSmooth, x, y) - 2*cameraBlackLevel);
+            double bg = norm*cameraGain*(valueAt(bgSmooth, x, y) - channelCount()*cameraBlackLevel);
 
             if (bg > 1){
                 bg = Math.sqrt(bg);
@@ -1225,12 +1237,16 @@ public class smFRETSpotFinder implements Command, Interactive {
     /**
      * Rebuild the summed image, unless the inputs it depends on are unchanged since last time.
      *
-     * Sets cachedSum, cachedWidth and cachedHeight. The mapping is loaded here too rather than on
-     * every run, which is safe because the mapping file is part of the key.
+     * Sets cachedTarget, cachedSource, cachedWidth and cachedHeight. The mapping is loaded here too
+     * rather than on every run, which is safe because the mapping file is part of the key.
+     *
+     * The two halves are cached rather than the image spots are found in, so that changing
+     * spotChannel does not throw away the expensive part. Comparing the same field across the
+     * donor, the acceptor and the sum is exactly the thing an interactive dialog is for.
      */
-    private void buildSumImage() {
+    private void buildChannelImages() {
         String inputs = inputImageName + "|" + mappingFile + "|" + startSlice + "|" + endSlice;
-        if (inputs.equals(cachedInputs) && (cachedSum != null)) {
+        if (inputs.equals(cachedInputs) && (cachedTarget != null)) {
             log.info("reusing the averaged image - inputs unchanged");
             return;
         }
@@ -1249,26 +1265,63 @@ public class smFRETSpotFinder implements Command, Interactive {
         log.info("average image - " + smFRETChannelMapper.frameCount(inputImage) + " frames");
         ImagePlus averageImage = smfcm.averageImagePlus(inputImage, startSlice, endSlice);
 
-        // split, transform and add the two channels together.
+        // split and transform the source half onto the target half's coordinate frame.
         log.info("split and transform");
         java.util.List<ImagePlus> images = smfcm.splitImagePlus(averageImage, true);
 
-        // Added in float. This was ImageCalculator's "add create", which takes the result type
-        // from its first argument - the target half, which for an 8 bit movie is 8 bit, so the
-        // sum of the two channels saturated at 255. On the example data that pinned 20 pixels,
-        // and they were spot centres, which is exactly where the signal is. Everything
-        // downstream of here - the maxima, the SNR, the prominence - was reading a clipped
-        // image.
-        RandomAccessibleInterval<FloatType> targetHalf = ImageJFunctions.convertFloat(images.get(0));
-        RandomAccessibleInterval<FloatType> sourceHalf = ImageJFunctions.convertFloat(images.get(1));
-        Shared sum = new Shared((int) targetHalf.dimension(0), (int) targetHalf.dimension(1));
-        LoopBuilder.setImages(sum.img, targetHalf, sourceHalf)
-                .forEachPixel((out, t, s) -> out.set(t.get() + s.get()));
-
-        cachedSum = sum;
+        cachedTarget = copyOf(ImageJFunctions.convertFloat(images.get(0)));
+        cachedSource = copyOf(ImageJFunctions.convertFloat(images.get(1)));
         cachedWidth = averageImage.getWidth();
         cachedHeight = averageImage.getHeight();
         cachedInputs = inputs;
+    }
+
+    /**
+     * A Shared holding a copy of the pixels, so the cached halves are never written through.
+     */
+    private static Shared copyOf(RandomAccessibleInterval<FloatType> image) {
+        Shared out = new Shared((int) image.dimension(0), (int) image.dimension(1));
+        int[] index = {0};
+        LoopBuilder.setImages(Views.flatIterable(image))
+                .forEachPixel(v -> out.pixels[index[0]++] = v.get());
+        return out;
+    }
+
+    /**
+     * The image spots are found in, built from the cached halves according to spotChannel.
+     *
+     * The sum is computed in float. It was ImageCalculator's "add create", which takes the result
+     * type from its first argument - the target half, which for an 8 bit movie is 8 bit, so the
+     * sum of the two channels saturated at 255. On the example data that pinned 20 pixels, and
+     * they were spot centres, which is exactly where the signal is. Everything downstream of here
+     * - the maxima, the SNR, the prominence - was reading a clipped image.
+     *
+     * A fresh image every run, including for the single channel cases where it is only a copy.
+     * Handing back the cached half itself would be quicker by a fraction of a millisecond and
+     * would let anything downstream that ever wrote to it corrupt the cache.
+     */
+    private Shared channelImage() {
+        Shared out = new Shared(cachedTarget.width, cachedTarget.height);
+        if ("donor".equals(spotChannel)) {
+            System.arraycopy(cachedTarget.pixels, 0, out.pixels, 0, out.pixels.length);
+        } else if ("acceptor".equals(spotChannel)) {
+            System.arraycopy(cachedSource.pixels, 0, out.pixels, 0, out.pixels.length);
+        } else {
+            LoopBuilder.setImages(out.img, cachedTarget.img, cachedSource.img)
+                    .forEachPixel((o, t, s) -> o.set(t.get() + s.get()));
+        }
+        return out;
+    }
+
+    /**
+     * How many camera black levels are in the image spots are found in.
+     *
+     * Two when the halves are added together, one otherwise. spotFilterSNR subtracts this from the
+     * background before taking its square root, so getting it wrong on a single channel would
+     * over-subtract a whole black level - 5 ADU on the example data - and shift every SNR.
+     */
+    private int channelCount() {
+        return "sum".equals(spotChannel) ? 2 : 1;
     }
 
     /**
@@ -1297,8 +1350,9 @@ public class smFRETSpotFinder implements Command, Interactive {
             }
             log.info("save root " + saveRootName);
 
-            buildSumImage();
-            Shared sum = cachedSum;
+            buildChannelImages();
+            Shared sum = channelImage();
+            log.info("finding spots in the " + spotChannel + " image");
             ImagePlus sumImage = new ImagePlus("spot_qc_image", sum.processor);
 
             // find all spots in tne sum image.
@@ -1352,6 +1406,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             // JSON file w/ analysis parameters, etc.
             Map<String, Object> mapping = new HashMap<>();
             mapping.put("camera black", cameraBlackLevel);
+            mapping.put("spot channel", spotChannel);
             mapping.put("camera gain", cameraGain);
             mapping.put("background kappa", clippingThreshold());
             mapping.put("edge margin", edgeMargin);

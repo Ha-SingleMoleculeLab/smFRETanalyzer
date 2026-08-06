@@ -5,6 +5,7 @@
 import com.fasterxml.jackson.databind.ObjectMapper;
 import ij.IJ;
 import ij.ImagePlus;
+import ij.Macro;
 import ij.gui.Overlay;
 import ij.gui.Roi;
 import ij.io.FileSaver;
@@ -26,11 +27,13 @@ import net.imglib2.loops.LoopBuilder;
 import net.imglib2.type.numeric.real.FloatType;
 import net.imglib2.view.Views;
 import org.scijava.command.Command;
+import org.scijava.command.Interactive;
 import org.scijava.log.LogService;
 import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
+import org.scijava.widget.Button;
 
 import java.awt.*;
 import java.io.File;
@@ -39,11 +42,23 @@ import java.util.HashMap;
 import java.util.Map;
 
 
+/**
+ * Interactive, so the parameter dialog stays open between runs.
+ *
+ * Spot finding is a thing you tune rather than a thing you do once - the threshold, the tolerance
+ * and the prominence all have to be looked at against the image before they are right - and with a
+ * plain Command that meant going back to the Plugins menu for every adjustment. Implementing
+ * Interactive gets a non-modal dialog out of the same @Parameter declarations, so nothing about
+ * the widgets, the labels or the min validation changes; only its lifetime does. The findSpots
+ * button is what actually runs an analysis, because the alternative - running on every keystroke -
+ * would re-analyse and rewrite four output files while a number is being typed. Opening the
+ * dialog does nothing either - see run() for how that is kept out of the way of the macros.
+ */
 @Plugin(type = Command.class, headless = true,
         menu = {@Menu(label = "Plugins"),
                 @Menu(label = "smFRET"),
                 @Menu(label = "smFRET Spot Finder", weight = 2.0)})
-public class smFRETSpotFinder implements Command {
+public class smFRETSpotFinder implements Command, Interactive {
     @Parameter
     LogService log;
 
@@ -98,6 +113,10 @@ public class smFRETSpotFinder implements Command {
 
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
     Double backgroundKappa = 0.0;
+
+    @Parameter (label = "Find spots", description = "run spot finding with the settings above",
+                callback = "findSpots")
+    private Button findSpotsButton;
 
     // Rounds of clipping in backgroundEstimate. It settles in three or four -
     // each round removes the brightest leftovers and the ones after that find
@@ -167,6 +186,22 @@ public class smFRETSpotFinder implements Command {
     // buys no speed either. This does not touch spotSigma: the decimation lives
     // in maskedSmooth, which only ever runs at backgroundSmoothing.
     private static final int backgroundDecimation = 4;
+
+    // Everything up to the summed image - loading, the temporal average, the split and the warp -
+    // depends only on these four inputs and on none of the parameters being tuned, so it is kept
+    // between runs and rebuilt only when one of them changes. It is most of the cost of a run,
+    // which is the difference between adjusting a threshold and waiting for one.
+    //
+    // startSlice and endSlice are in the key because they choose which frames are averaged: change
+    // either and the summed image is a different image, so the whole prefix has to be redone.
+    private String cachedInputs;
+    private Shared cachedSum;
+    private int cachedWidth;
+    private int cachedHeight;
+
+    // The displayed QC image, kept so that repeated runs update one window instead of opening one
+    // window per run.
+    private ImagePlus qcWindow;
 
     // Member variables.
     public ImagePlus backgroundMask;
@@ -1169,8 +1204,88 @@ public class smFRETSpotFinder implements Command {
      * Run ...
      */
     @Override
+    /**
+     * Analyse straight away when there is no dialog to press a button in, and not otherwise.
+     *
+     * SciJava runs an Interactive command once as it opens the dialog, which is not what opening
+     * a dialog should mean: the point of keeping it open is to set the parameters up before
+     * anything happens. So an interactive session waits for findSpots.
+     *
+     * A macro has no button to press, and the batch macros drive this as
+     * run("smFRET Spot Finder", "inputimagename=... spotthreshold=..."), so a run carrying macro
+     * options has to analyse here or it would do nothing at all. ij.Macro.getOptions is non-null
+     * exactly for that case. Headless is the same argument with no UI at all.
+     */
     public void run() {
+        if (isHeadless || (Macro.getOptions() != null)) {
+            findSpots();
+        }
+    }
+
+    /**
+     * Rebuild the summed image, unless the inputs it depends on are unchanged since last time.
+     *
+     * Sets cachedSum, cachedWidth and cachedHeight. The mapping is loaded here too rather than on
+     * every run, which is safe because the mapping file is part of the key.
+     */
+    private void buildSumImage() {
+        String inputs = inputImageName + "|" + mappingFile + "|" + startSlice + "|" + endSlice;
+        if (inputs.equals(cachedInputs) && (cachedSum != null)) {
+            log.info("reusing the averaged image - inputs unchanged");
+            return;
+        }
+        cachedInputs = null;
+
+        // Load the image to process.
+        ImagePlus inputImage = new ImagePlus(inputImageName.toString());
+        smFRETChannelMapper.requireGrayscale(inputImage, "the image " + inputImageName);
+        smFRETChannelMapper.requireTimeStack(inputImage, "the image " + inputImageName);
+        inputImage = smFRETChannelMapper.toFloat(inputImage);
+
+        // Load the channel to channel mapping file.
+        loadMappingJSON(mappingFile.toString());
+
+        // Average image.
+        log.info("average image - " + smFRETChannelMapper.frameCount(inputImage) + " frames");
+        ImagePlus averageImage = smfcm.averageImagePlus(inputImage, startSlice, endSlice);
+
+        // split, transform and add the two channels together.
+        log.info("split and transform");
+        java.util.List<ImagePlus> images = smfcm.splitImagePlus(averageImage, true);
+
+        // Added in float. This was ImageCalculator's "add create", which takes the result type
+        // from its first argument - the target half, which for an 8 bit movie is 8 bit, so the
+        // sum of the two channels saturated at 255. On the example data that pinned 20 pixels,
+        // and they were spot centres, which is exactly where the signal is. Everything
+        // downstream of here - the maxima, the SNR, the prominence - was reading a clipped
+        // image.
+        RandomAccessibleInterval<FloatType> targetHalf = ImageJFunctions.convertFloat(images.get(0));
+        RandomAccessibleInterval<FloatType> sourceHalf = ImageJFunctions.convertFloat(images.get(1));
+        Shared sum = new Shared((int) targetHalf.dimension(0), (int) targetHalf.dimension(1));
+        LoopBuilder.setImages(sum.img, targetHalf, sourceHalf)
+                .forEachPixel((out, t, s) -> out.set(t.get() + s.get()));
+
+        cachedSum = sum;
+        cachedWidth = averageImage.getWidth();
+        cachedHeight = averageImage.getHeight();
+        cachedInputs = inputs;
+    }
+
+    /**
+     * Find spots with the current settings, and write the results.
+     *
+     * This is both what the dialog's button calls and what run() does, so a scripted single run
+     * and an interactive adjustment go down exactly the same path.
+     *
+     * It returns quietly when the two files have not been chosen yet, because an interactive
+     * dialog exists before its inputs do and the framework is free to call run() at that point.
+     */
+    public void findSpots() {
         try {
+            if ((inputImageName == null) || (mappingFile == null)) {
+                log.info("choose an image and a mapping file, then press Find spots");
+                return;
+            }
 	        log.info("starting spot finding on image " + inputImageName);
 
             // Root name to use for saving output, this is just the file name
@@ -1182,35 +1297,8 @@ public class smFRETSpotFinder implements Command {
             }
             log.info("save root " + saveRootName);
 
-            // Load the image to process.
-            ImagePlus inputImage = new ImagePlus(inputImageName.toString());
-            smFRETChannelMapper.requireGrayscale(inputImage, "the image " + inputImageName);
-            smFRETChannelMapper.requireTimeStack(inputImage, "the image " + inputImageName);
-            inputImage = smFRETChannelMapper.toFloat(inputImage);
-
-            // Load the channel to channel mapping file.
-            loadMappingJSON(mappingFile.toString());
-
-            // Average image.
-            log.info("average image - " + smFRETChannelMapper.frameCount(inputImage) + " frames");
-            ImagePlus averageImage = smfcm.averageImagePlus(inputImage, startSlice, endSlice);
-
-            // split, transform and add the two channels together.
-            log.info("split and transform");
-            java.util.List<ImagePlus> images = smfcm.splitImagePlus(averageImage, true);
-
-            // Added in float. This was ImageCalculator's "add create", which takes the result type
-            // from its first argument - the target half, which for an 8 bit movie is 8 bit, so the
-            // sum of the two channels saturated at 255. On the example data that pinned 20 pixels,
-            // and they were spot centres, which is exactly where the signal is. Everything
-            // downstream of here - the maxima, the SNR, the prominence - was reading a clipped
-            // image.
-            RandomAccessibleInterval<FloatType> targetHalf = ImageJFunctions.convertFloat(images.get(0));
-            RandomAccessibleInterval<FloatType> sourceHalf = ImageJFunctions.convertFloat(images.get(1));
-            Shared sum = new Shared((int) targetHalf.dimension(0), (int) targetHalf.dimension(1));
-            LoopBuilder.setImages(sum.img, targetHalf, sourceHalf)
-                    .forEachPixel((out, t, s) -> out.set(t.get() + s.get()));
-
+            buildSumImage();
+            Shared sum = cachedSum;
             ImagePlus sumImage = new ImagePlus("spot_qc_image", sum.processor);
 
             // find all spots in tne sum image.
@@ -1219,18 +1307,18 @@ public class smFRETSpotFinder implements Command {
 
             // filter spots that are near the edges of either channel.
             // overlapMask because this is where the channels overlap.
-            overlapMask = createOverlapMask(averageImage.getWidth(), averageImage.getHeight());
+            overlapMask = createOverlapMask(cachedWidth, cachedHeight);
             double[][] filteredSpots = spotFilterWithMask(allSpots, overlapMask);
             log.info("after edge proximity filter " + countGoodSpots(filteredSpots));
 
             // filter spots that are too close to each other.
-            ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), 2*spotSpacing);
+            ImagePlus proximityMask = createSpotsNeighborhoodMask(allSpots, cachedWidth/2, cachedHeight, 2*spotSpacing);
             proximityMask = neighborhoodMaskToProximityMask(proximityMask);
             filteredSpots = spotFilterWithMask(filteredSpots, proximityMask);
             log.info("after spot proximity filter " + countGoodSpots(filteredSpots));
 
             // filter low SNR spots.
-            backgroundMask = createSpotsNeighborhoodMask(allSpots, averageImage.getWidth()/2, averageImage.getHeight(), spotMargin);
+            backgroundMask = createSpotsNeighborhoodMask(allSpots, cachedWidth/2, cachedHeight, spotMargin);
             backgroundMask = neighborhoodMaskToBackgroundMask(backgroundMask);
             ImagePlus backgroundImage = backgroundEstimate(sumImage);
             filteredSpots = spotFilterSNR(filteredSpots, sumImage, backgroundImage);
@@ -1244,8 +1332,17 @@ public class smFRETSpotFinder implements Command {
             Overlay ov = getSpotOverlay(filteredSpots, spotMargin, Color.GREEN);
             sumImage.setOverlay(ov);
 
+            // One window, updated in place. Showing a new one per run would leave a window per
+            // parameter adjustment, which is the opposite of what an interactive dialog is for.
             if (!isHeadless) {
-                ui.show(sumImage);
+                if ((qcWindow != null) && (qcWindow.getWindow() != null)) {
+                    qcWindow.setProcessor(sum.processor);
+                    qcWindow.setOverlay(ov);
+                    qcWindow.updateAndDraw();
+                } else {
+                    qcWindow = sumImage;
+                    ui.show(sumImage);
+                }
             }
 
             // save analysis results.

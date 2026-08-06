@@ -23,6 +23,10 @@ This plugin is used to find an affine mapping between the donor/target and accep
 
 This plugin is used to find the spots in the FRET image stack.
 
+Its dialog stays open. Spot finding usually needs a few passes to get the threshold, tolerance and prominence right for a given image, so nothing happens when the dialog opens and nothing happens until you press **Find spots** - and the dialog is still there afterwards for the next adjustment. Batch macros are unaffected: a `run("smFRET Spot Finder", "...")` call still analyses immediately, since there is no button for it to press. The QC image is one window that updates in place rather than a new window per run, and each run rewrites the output files, so whatever is on disk matches the settings you last ran.
+
+Re-running only redoes the work that can change. The averaged, split and mapped image is kept between runs and rebuilt only when the image, the mapping file, or the start/end slice changes - so adjusting a spot finding parameter is quick, while changing the slice range costs a full pass.
+
 #### Parameters:
 
 * Image - The FRET image stack to analyze for spots (and time traces).
@@ -38,6 +42,7 @@ This plugin is used to find the spots in the FRET image stack.
 * SpotSpacing - The minimum allowd distance between spots (pixels).
 * EdgeMargin - The margin around the edge of the overlap region of the two channels to ignore (pixels).
 * BackgroundKappa - How far above the background estimate a pixel may sit, in robust standard deviations, before it is treated as spot light and excluded. **Leave at 0 for the default of 1.3**, which is what a sweep from 0.4 to 10 against a known background gives, at spot sizes from 1 to 3 and at the spot density of real data. It does not depend on spot size: the best value is flat from about 1.0 to 1.6 once aggregated over spot size, and is not monotone within it, so the earlier `1.5 - 0.3 * SpotSigma` rule has been dropped. Set it explicitly to override; the sweep behind the default assumes a smooth illumination profile, and one real movie wanted a looser clip at 1.8, so the escape hatch is there on purpose. Clipping only from above would leave the estimate reading low by about an ADU, which is enough to matter, so the estimator puts that bias back analytically - the value you set here therefore controls which pixels are excluded and no longer also shifts the background level.
+* Find spots - Runs spot finding with the settings above. The dialog stays open, so you can adjust and run again.
 
 #### Outputs:
 
@@ -61,7 +66,7 @@ This plugin measures the FRET time traces for each of the spots in the FRET imag
 
 ### smFRETTraceHistogram
 
-This plugin plots histograms of the time traces measured by smFRETAnalyzer. Each trace contributes a single point, the average of that trace over the selected frame interval, so there is one entry per molecule rather than one per frame. Unlike the other plugins it is interactive - the histogram is recomputed as the controls are adjusted, so that the interval and the intensity threshold can be chosen by eye.
+This plugin plots histograms of the time traces measured by smFRETAnalyzer. Each trace contributes a single point, the average of that trace over the selected frame interval, so there is one entry per molecule rather than one per frame. Like smFRETSpotFinder its window stays open, but it goes further: the histogram is recomputed as the controls are adjusted rather than on a button press, so the interval and the intensity threshold can be chosen by eye.
 
 #### Parameters:
 

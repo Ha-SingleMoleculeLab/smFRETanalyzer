@@ -93,6 +93,30 @@ Nothing is written unless you ask for it:
 * <image_name>_histogram.csv - The bin centers and counts of the displayed histogram, via 'Save CSV'.
 * <image_name>_histogram.png - The displayed plot, titled with the H5 file name so that a saved plot can be identified on its own, via 'Save PNG'.
 
+### smFRETTraceVisualizer
+
+This plugin shows one spot at a time: its time traces alongside the images they were measured from. It is interactive and writes nothing. There are two windows - the field of spots, which is where a spot is picked, and a second window holding everything that follows from that pick.
+
+Its input is the **spot finder JSON**, which names the image, the mapping and the spot table, and whose own path gives the root name the `.h5` was written under - so smFRETAnalyzer must already have been run on that JSON. If the `.h5` is missing it says so by name. The root name is taken from the JSON file's path rather than the value recorded inside it, so the files can be moved or opened from a different working directory.
+
+#### Parameters:
+
+* Spot Finder JSON file - The JSON file written by smFRETSpotFinder.
+
+#### Windows:
+
+**Spots** - The spot finding QC image with every spot circled. This is the averaged image at whatever SpotChannel was used, not a single frame, so the spots are actually visible. Click near a spot to select it; clicking away from any spot changes nothing. It keeps a window of its own because it is 256 x 512 and wants the height, and because picking one spot out of a crowded field needs it drawn large.
+
+**Traces** - Everything that follows from the selection, in one window:
+
+* *Upper panel* - The selected spot's donor and acceptor intensities above, the FRET ratio below, sharing the frame axis. FRET is drawn over a fixed -0.2 to 1.2, the same range smFRETTraceHistogram uses, and is clamped to that range when the donor and acceptor sum is near zero and the ratio blows up - the status line marks such a value 'off scale' so it is clear why the number and the plot disagree. An orange line marks the frame the images below are showing.
+* *Lower panels* - The selected spot in the donor and acceptor channels side by side, at the selected frame, magnified, with a circle at 2 x SpotSigma. The acceptor is mapped onto the donor's coordinate frame, the same way smFRETAnalyzer measures it. Both share one display range, measured once over the whole movie from both channels, so brightness means the same thing from frame to frame and between the two channels - which is what makes bleaching and FRET anticorrelation visible rather than being normalized away. The range is measured from up to 48 evenly spaced frames rather than all of them, since each sample costs a split and a warp.
+* The frame slider and the buttons that step through the spots sit at the bottom.
+
+The divider between the traces and the images can be dragged. Making the window taller gives the extra height to the traces, since the images are square and stop gaining from it.
+
+Closing either window closes both.
+
 ## Input requirements ##
 
 The image stack must be a **time series**: one frame per time point, both FRET channels side by side within each frame. ImageJ cannot distinguish a movie from a depth stack saved as a plain TIFF, so a stack with a single non-singleton axis is taken as time whichever way ImageJ labelled it. Images with both depth and time, or with more than one channel, are refused — reduce them with `Image > Hyperstacks > Hyperstack to Stack` first.

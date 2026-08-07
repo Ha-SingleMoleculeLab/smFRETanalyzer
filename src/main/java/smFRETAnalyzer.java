@@ -396,15 +396,23 @@ public class smFRETAnalyzer implements Command {
             log.info("estimating background in channels");
             java.util.List<ImagePlus> bgEstimates = backGroundEstimation(image);
 
-            if (!isHeadless) {
-                ui.show(bgEstimates.get(0));
-                ui.show(bgEstimates.get(1));
-            }
-
             // Measure spot time traces.
             log.info("measuring time traces");
             double[][] timeTraces = measureTimeTraces(image, bgEstimates, spots, spotSigma, cameraGain);
             log.info(timeTraces.length + " " + timeTraces[0].length);
+
+            // The background estimates, shown only now. They used to appear as soon as the
+            // estimate finished, which is before the measurement that takes most of the run -
+            // two windows arriving while the plugin still had minutes of work left read as if
+            // it were done.
+            //
+            // Under diagnostic_mode along with the TIFs of these same two images, which is the
+            // flag it always should have been under: turning diagnostics off stopped the files
+            // being written but left the windows opening.
+            if (diagnostic_mode && !isHeadless) {
+                ui.show(bgEstimates.get(0));
+                ui.show(bgEstimates.get(1));
+            }
 
             // Save time traces in '.traces' format:
             if (saveAsTraces){

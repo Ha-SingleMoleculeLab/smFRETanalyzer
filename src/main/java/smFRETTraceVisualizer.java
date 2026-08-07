@@ -19,6 +19,7 @@ import ch.systemsx.cisd.hdf5.IHDF5Reader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import ij.IJ;
+import ij.ImageListener;
 import ij.ImagePlus;
 import ij.gui.ImageCanvas;
 import ij.gui.OvalRoi;
@@ -65,10 +66,9 @@ public class smFRETTraceVisualizer implements Command {
     private static final double FRET_MIN = -0.2;
     private static final double FRET_MAX = 1.2;
 
-    // Display range for the zoom panels is measured from this many frames, evenly spaced. Every
-    // sample costs a split and a warp of one frame, so measuring all of them would stall a click
-    // for a second or so on a long movie for a range that barely moves.
-    private static final int ZOOM_RANGE_SAMPLES = 48;
+    // Spot channel of a spot finder JSON written before the setting existed. That was the only
+    // behaviour then, so it is what such a file must mean.
+    private static final String DEFAULT_SPOT_CHANNEL = "sum";
 
     private static final Color ACCEPTOR_COLOR = new Color(200, 60, 40);
     private static final Color DONOR_COLOR = new Color(30, 140, 60);
@@ -84,6 +84,7 @@ public class smFRETTraceVisualizer implements Command {
 
     // The spots window, a real ImageJ window rather than a panel of ours - see showFieldWindow.
     private ImagePlus fieldWindow;
+    private ImageListener fieldListener;
     private JSlider frameSlider;
     private boolean closing = false;
     private JFrame traceFrame;
@@ -96,6 +97,19 @@ public class smFRETTraceVisualizer implements Command {
     private float[][] sourceTraces;      // [spot][frame], acceptor.
     private double[][] spots;            // [spot][x, y, snr, prominence] - the reloaded layout.
     private double spotSigma = 2.0;
+
+    // What the zoom panels scale the spots window's display range by, so that adjusting
+    // Brightness/Contrast there adjusts them too: one over the number of channels that went into
+    // the image spots were found in. The QC image is the *sum* of both channels by default and
+    // each zoom shows one of them, which puts the whole intensity axis - background included -
+    // at half; at a spot channel of donor or acceptor the QC image is already one channel and
+    // the factor is 1.
+    //
+    // Structural rather than fitted to the images, deliberately. The measured medians are 0.603
+    // and 0.488 of the QC median on the example data, and they differ because the donor and the
+    // acceptor really are different brightnesses - calibrating that out would erase a real
+    // difference rather than correct a scale.
+    private double zoomContrastRatio = 0.5;
     private JLabel statusLabel;
     private float[][] targetTraces;      // [spot][frame], donor.
     private TracePanel tracePanel;
@@ -123,6 +137,11 @@ public class smFRETTraceVisualizer implements Command {
 
         spotSigma = ((Number) mapping.get("spot sigma")).doubleValue();
         zoomHalfWidth = Math.max(6, (int) Math.round(4.0 * spotSigma));
+
+        // Same test smFRETSpotFinder.channelCount makes, against the same recorded setting.
+        Object channel = mapping.get("spot channel");
+        String spotChannel = (channel == null) ? DEFAULT_SPOT_CHANNEL : String.valueOf(channel);
+        zoomContrastRatio = "sum".equals(spotChannel) ? 0.5 : 1.0;
 
         File spotsFile = locate((String) mapping.get("spots file"), jsonDir, root + "_spotf_spots.csv");
         File imageFile = locate((String) mapping.get("image name"), jsonDir, null);
@@ -166,7 +185,9 @@ public class smFRETTraceVisualizer implements Command {
         smFRETChannelMapper.requireGrayscale(movie, "the image " + imageFile);
         smFRETChannelMapper.requireTimeStack(movie, "the image " + imageFile);
 
-        log.info("loaded " + nSpots + " spots, " + nFrames + " frames, from " + root);
+        log.info("loaded " + nSpots + " spots, " + nFrames + " frames, from " + root
+                + "; spots found in the " + spotChannel + " image, so the zoom panels take "
+                + zoomContrastRatio + " of the spot window's display range");
     }
 
     /**
@@ -225,31 +246,35 @@ public class smFRETTraceVisualizer implements Command {
     }
 
     /**
-     * One display range for both zoom panels over the whole movie, so that brightness means the
-     * same thing from frame to frame and from one channel to the other - which is what makes
-     * bleaching and FRET anticorrelation visible rather than being normalized away.
+     * Take the display range from the spots window, scaled.
+     *
+     * One range for both panels and every spot and frame, so brightness still means the same
+     * thing from frame to frame, between the two channels and from one spot to the next - which
+     * is what keeps bleaching and FRET anticorrelation visible rather than normalized away. It
+     * used to be measured per spot by sampling frames off the movie; taking it from the field
+     * instead keeps that property, puts it under Brightness/Contrast where it can be adjusted,
+     * and drops the per selection sampling cost entirely.
      */
-    private void measureZoomRange() {
-        int x = (int) spots[selectedSpot][0];
-        int y = (int) spots[selectedSpot][1];
-        int samples = Math.min(nFrames, ZOOM_RANGE_SAMPLES);
-
-        double low = Double.MAX_VALUE;
-        double high = -Double.MAX_VALUE;
-        for (int i = 0; i < samples; i++) {
-            int frame = 1 + (int) Math.round((double) i * (nFrames - 1) / Math.max(1, samples - 1));
-            for (ImagePlus half : splitFrame(frame)) {
-                for (float value : crop(half, x, y)) {
-                    if (value < low) { low = value; }
-                    if (value > high) { high = value; }
-                }
-            }
+    private void syncZoomRange() {
+        if (fieldWindow == null) {
+            return;
         }
+        double low = zoomContrastRatio * fieldWindow.getDisplayRangeMin();
+        double high = zoomContrastRatio * fieldWindow.getDisplayRangeMax();
         if (high <= low) {
             high = low + 1.0;
         }
+        if ((low == zoomLow) && (high == zoomHigh)) {
+            return;
+        }
         zoomLow = low;
         zoomHigh = high;
+        if (donorPanel != null) {
+            donorPanel.repaint();
+        }
+        if (acceptorPanel != null) {
+            acceptorPanel.repaint();
+        }
     }
 
     /**
@@ -331,6 +356,29 @@ public class smFRETTraceVisualizer implements Command {
                 }
             });
         }
+        // Brightness/Contrast changes the display range and then calls updateAndDraw, which is
+        // what notifies listeners - there is no display range event of its own to listen for.
+        // The registry is static and global, hence both the identity test and the removal in
+        // closeAll.
+        fieldListener = new ImageListener() {
+            @Override
+            public void imageOpened(ImagePlus imp) {
+            }
+
+            @Override
+            public void imageClosed(ImagePlus imp) {
+            }
+
+            @Override
+            public void imageUpdated(ImagePlus imp) {
+                if (imp == fieldWindow) {
+                    syncZoomRange();
+                }
+            }
+        };
+        ImagePlus.addImageListener(fieldListener);
+        syncZoomRange();
+
         if (fieldWindow.getWindow() != null) {
             fieldWindow.getWindow().addWindowListener(new WindowAdapter() {
                 @Override
@@ -602,7 +650,6 @@ public class smFRETTraceVisualizer implements Command {
             return;
         }
         selectedSpot = index;
-        measureZoomRange();
         updateZoom();
         updateFieldOverlay();
         tracePanel.repaint();
@@ -753,6 +800,10 @@ public class smFRETTraceVisualizer implements Command {
             return;
         }
         closing = true;
+        if (fieldListener != null) {
+            ImagePlus.removeImageListener(fieldListener);
+            fieldListener = null;
+        }
         if (traceFrame != null) {
             traceFrame.dispose();
         }

@@ -3,7 +3,8 @@
 import json
 import numpy as np
 
-rows = json.load(open("tune_sweep.json"))
+with open("tune_sweep.json") as fh:
+    rows = json.load(fh)
 sigmas = sorted(set(r["sigma"] for r in rows))
 densities = sorted(set(r["spots"] for r in rows), reverse=True)
 tols = sorted(set(r["tol"] for r in rows))

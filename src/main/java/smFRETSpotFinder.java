@@ -273,7 +273,15 @@ public class smFRETSpotFinder implements Command, Interactive {
     // Member variables.
     public ImagePlus backgroundMask;
     public java.util.List<String> columnHeaders = Arrays.asList("x", "y", "snr", "prominence"); // the first two fields should always be "x","y".
-    private final boolean diagnostic_mode = false;
+    // Off unless -Dsmfret.diagnostics=true, which turns the intermediate images back on.
+    //
+    // Read from a property rather than written as a literal, and that is load bearing: as
+    // `private final boolean diagnostic_mode = false` this is a *compile time constant*, so
+    // javac folds every `if (diagnostic_mode)` block away and the code is not merely disabled
+    // but gone - the file name constants disappear from the class file. That silently broke the
+    // sweeps in tools/, which score the background estimate by reading those images. Still
+    // final; just not constant.
+    private final boolean diagnostic_mode = Boolean.getBoolean("smfret.diagnostics");
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus overlapMask;
     private String saveRootName;

@@ -23,7 +23,6 @@ import ij.io.FileSaver;
 import ij.plugin.RGBStackMerge;
 import ij.process.FloatProcessor;
 import ij.process.ImageConverter;
-import ij.process.ImageProcessor;
 
 import net.imglib2.Cursor;
 import net.imglib2.RandomAccessibleInterval;
@@ -70,7 +69,15 @@ public class smFRETChannelMapper implements Command {
     Integer endSlice = 30;
 
     // Member variables.
-    private final boolean diagnostic_mode = false;
+    // Off unless -Dsmfret.diagnostics=true, which turns the intermediate images back on.
+    //
+    // Read from a property rather than written as a literal, and that is load bearing: as
+    // `private final boolean diagnostic_mode = false` this is a *compile time constant*, so
+    // javac folds every `if (diagnostic_mode)` block away and the code is not merely disabled
+    // but gone - the file name constants disappear from the class file. That silently broke the
+    // sweeps in tools/, which score the background estimate by reading those images. Still
+    // final; just not constant.
+    private final boolean diagnostic_mode = Boolean.getBoolean("smfret.diagnostics");
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private int mapImageWidth = 0;              // Expected image width for the transform.
     private int mapImageHeight = 0;             // Expected image height for the transform.
@@ -575,10 +582,15 @@ public class smFRETChannelMapper implements Command {
             log.info("calculating affine transform matrix");
 
             // Get updated landmark points used for the best fit transform.
-            Method method = turboRegObject.getClass().getMethod("getSourcePoints", null);
-            double[][] sourcePoints = (double[][]) method.invoke(turboRegObject, null);
-            method = turboRegObject.getClass().getMethod("getTargetPoints", null);
-            double[][] targetPoints = (double[][]) method.invoke(turboRegObject, null);
+            //
+            // Both of these take no arguments, and saying so by passing nothing is not the same
+            // as passing null: getMethod and invoke are varargs, so a bare null is ambiguous
+            // between "no arguments" and "one argument which is null" and the compiler has to
+            // pick. It picks the one wanted here, but only by a rule nobody should have to know.
+            Method method = turboRegObject.getClass().getMethod("getSourcePoints");
+            double[][] sourcePoints = (double[][]) method.invoke(turboRegObject);
+            method = turboRegObject.getClass().getMethod("getTargetPoints");
+            double[][] targetPoints = (double[][]) method.invoke(turboRegObject);
             log.info(sourcePoints.length + " " + targetPoints[0].length);
 
             // Calculate affine transform matrix.

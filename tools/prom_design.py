@@ -16,7 +16,7 @@ Candidates:
 Run gen_shape.py at constant SNR first - `N` proportional to sigma - or the large sigma fields
 sit at the detection limit and the comparison is meaningless.
 """
-import json, math, os, sys
+import math
 import numpy as np
 import tifffile
 

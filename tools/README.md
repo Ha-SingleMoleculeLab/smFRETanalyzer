@@ -61,6 +61,11 @@ rebuilt. Both are compiled into the working directory by `rig.py`, or by hand:
 javac -cp target/classes:$(cat tools/cp.txt) -d . tools/RunTune.java
 ```
 
+**Run the plugins with `-Dsmfret.diagnostics=true`.** The sweeps score the background estimate
+by reading `_spotf_bg_smooth.tif` and `_spotf_fg_smooth.tif`, which the plugins only write when
+that property is set - it is off for normal use. `tune_sweep.py` passes it already; anything
+driving `RunTune` or `Rig` by hand has to.
+
 ## A caveat on the numbers
 
 The example movies are 30 frames and their end-of-movie drop is **the illumination laser being

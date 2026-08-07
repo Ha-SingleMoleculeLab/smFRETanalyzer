@@ -13,7 +13,7 @@ import numpy as np
 import tifffile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from rig import CLASSES, JAVA, classpath          # noqa: E402
+from rig import CLASSES, JAVA, classpath
 
 FRAMES = 20
 MEDIAN_N = 400.0
@@ -56,7 +56,9 @@ for nspots in DENSITIES:
 
         for tol in TOLERANCES:
             subprocess.run(
-                [JAVA, "-Djava.awt.headless=true", "-Xmx8g",
+                # The sweep scores the background estimate by reading the plugin's own
+                # diagnostic image, which is off unless this is set.
+                [JAVA, "-Djava.awt.headless=true", "-Dsmfret.diagnostics=true", "-Xmx8g",
                  "-cp", os.pathsep.join([".", CLASSES, CP]),
                  "RunTune", d, str(sigma), str(tol), "-1000.0", str(FRAMES), str(THRESHOLD)],
                 check=True, capture_output=True, text=True)
@@ -100,5 +102,6 @@ for nspots in DENSITIES:
                   f"  recall {recall:5.3f}  fp {nfp:4d}  trusted {trusted:5.3f}"
                   f"  bgBias {r['bgBias']:+7.3f}  bgRms {r['bgRms']:6.3f}", flush=True)
 
-json.dump(rows, open("tune_sweep.json", "w"), indent=1)
+with open("tune_sweep.json", "w") as fh:
+    json.dump(rows, fh, indent=1)
 print("\nwrote tune_sweep.json - run analyze_tune.py to summarize")

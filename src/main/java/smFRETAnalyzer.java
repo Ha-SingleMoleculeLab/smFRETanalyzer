@@ -4,18 +4,25 @@
 
 import ch.systemsx.cisd.hdf5.HDF5Factory;
 import ch.systemsx.cisd.hdf5.IHDF5Writer;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.io.LittleEndianDataOutputStream;
 import ij.IJ;
 import ij.ImagePlus;
 import ij.ImageStack;
 import ij.io.FileSaver;
-import ij.plugin.Filters3D;
-import ij.process.ImageConverter;
+import ij.process.FloatProcessor;
+import net.imglib2.RandomAccessibleInterval;
+import net.imglib2.img.Img;
+import net.imglib2.img.array.ArrayImgs;
+import net.imglib2.img.display.imagej.ImageJFunctions;
+import net.imglib2.loops.LoopBuilder;
+import net.imglib2.type.numeric.real.DoubleType;
+import net.imglib2.type.numeric.real.FloatType;
+import net.imglib2.view.Views;
 import ij.process.ImageProcessor;
 import net.imagej.ops.OpService;
 import org.scijava.command.Command;
 import org.scijava.log.LogService;
+import org.scijava.plugin.Menu;
 import org.scijava.plugin.Parameter;
 import org.scijava.plugin.Plugin;
 import org.scijava.ui.UIService;
@@ -23,16 +30,16 @@ import org.scijava.ui.UIService;
 import java.awt.*;
 import java.io.File;
 import java.io.FileOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Map;
 
 
 @Plugin(type = Command.class, headless = true,
-        menuPath = "Plugins>smFRET>smFRET Time Traces")
+        menu = {@Menu(label = "Plugins"),
+                @Menu(label = "smFRET"),
+                @Menu(label = "smFRET Time Traces", weight = 3.0)})
 public class smFRETAnalyzer implements Command {
 
     // Parameters.
@@ -52,7 +59,15 @@ public class smFRETAnalyzer implements Command {
     Integer backgroundAverageNFrames = 30;
 
     // Member variables.
-    private final boolean diagnostic_mode = true;
+    // Off unless -Dsmfret.diagnostics=true, which turns the intermediate images back on.
+    //
+    // Read from a property rather than written as a literal, and that is load bearing: as
+    // `private final boolean diagnostic_mode = false` this is a *compile time constant*, so
+    // javac folds every `if (diagnostic_mode)` block away and the code is not merely disabled
+    // but gone - the file name constants disappear from the class file. That silently broke the
+    // sweeps in tools/, which score the background estimate by reading those images. Still
+    // final; just not constant.
+    private final boolean diagnostic_mode = Boolean.getBoolean("smfret.diagnostics");
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private String saveRootName;
     private final boolean saveAsTraces = true;
@@ -60,23 +75,26 @@ public class smFRETAnalyzer implements Command {
 
     /**
      * Stack background estimation.
-     * This is just a temporal boxcar filter.
+     *
+     * The temporal average is now what the comment here always claimed it was. It used to be
+     * Filters3D.filter(MEAN, 1, 1, N), whose x and y radius of 1 meant it averaged spatially as
+     * well - measurement put its neighbourhood somewhere between a 3x3xN box and a pure temporal
+     * window, matching neither.
+     *
+     * The spatial part is gone, and that was checked rather than assumed: putting a 3x3 average
+     * back moved the post-bleach donor level from -58 to -62, i.e. slightly further from the zero
+     * it should sit at. It is not doing useful work under a background estimator that goes on to
+     * smooth each frame at sigma 14.
      */
     public java.util.List<ImagePlus> backGroundEstimation(ImagePlus image) {
 
-        // Mean filter on z axis.
-        // FIXME: Use 0.5 for x/y radius?
-        // FIXME: Not sure how edge pixels are handled. Could be an issue if there is a
-        //        a large delta w/ time at the beginning/end of the movie.
-        ImageStack imageZFlt = Filters3D.filter(image.getStack(), Filters3D.MEAN, 1, 1, backgroundAverageNFrames);
+        ImageStack imageZFlt = temporalMean(image.getStack(), backgroundAverageNFrames);
 
         // Split into two separate stacks, one for each channel.
         ImageStack targetBg = new ImageStack();
         ImageStack sourceBg = new ImageStack();
 
         IJ.showStatus("Background estimation..");
-        ImagePlus targetImgEst = null;
-        ImagePlus sourceImgEst = null;
         int stepSize = Math.max(imageZFlt.size()/100, 1);
         for (int i = 1; i <= imageZFlt.size(); i++){
             if (i%stepSize == 0){
@@ -93,9 +111,11 @@ public class smFRETAnalyzer implements Command {
             ImagePlus targetImg = splitImages.get(0);
             ImagePlus sourceImg = splitImages.get(1);
 
-            // Estimate background in source and target.
-            targetImgEst = smfsf.backgroundEstimate(targetImg, targetImgEst);
-            sourceImgEst = smfsf.backgroundEstimate(sourceImg, sourceImgEst);
+            // Estimated from scratch each frame. Seeding this from the previous frame's level was
+            // tried and rejected - see backgroundEstimate - because it lands on a different answer
+            // rather than the same answer sooner.
+            ImagePlus targetImgEst = smfsf.backgroundEstimate(targetImg);
+            ImagePlus sourceImgEst = smfsf.backgroundEstimate(sourceImg);
 
             // Add to stack.
             targetBg.addSlice(targetImgEst.getProcessor());
@@ -130,13 +150,32 @@ public class smFRETAnalyzer implements Command {
      */
     public double[][] measureTimeTraces(ImagePlus image, java.util.List<ImagePlus> bgEstimates, double[][] spots, double spotSigma, double cameraGain){
         ImageStack imageS = image.getStack();
-        // Duplicating so we don't modify the input image.
-        ImageStack targetBg = bgEstimates.get(0).getStack().duplicate();
-        ImageStack sourceBg = bgEstimates.get(1).getStack().duplicate();
+
+        // Not duplicated any more: smoothed() copies before it blurs, so nothing here writes to
+        // the stacks it was handed.
+        ImageStack targetBg = bgEstimates.get(0).getStack();
+        ImageStack sourceBg = bgEstimates.get(1).getStack();
         double[][] timeTraces = new double[2*spots.length][imageS.getSize()];
 
         IJ.showStatus("Measuring time traces..");
-        double norm = 2.0*Math.PI*spotSigma*spotSigma;
+
+        // Recovers the spot's integrated intensity from the peak of the smoothed image.
+        //
+        // smoothed() convolves with a *normalized* Gaussian, so a spot carrying N photons at width
+        // sigmaSpot leaves N / (2 pi (sigmaSpot^2 + spotSigma^2)) at its centre - the widths add in
+        // quadrature, because a Gaussian convolved with a Gaussian is a wider Gaussian. Measuring
+        // at the size the spot actually is, which is what the pipeline assumes throughout, that
+        // denominator is 4 pi spotSigma^2, and that is the factor needed to get N back.
+        //
+        // This was 2 pi spotSigma^2, which is the factor that converts a normalized Gaussian to a
+        // unit height one. That is the right correction for the convolution kernel but not for the
+        // spot: it leaves the width of the spot itself out of the quadrature sum and so recovers
+        // only N/2. Every intensity this ever reported was half of what it should have been -
+        // measured at 0.48 to 0.50 of the known input across spot sizes 1.0 to 3.0, the shortfall
+        // below one half being pixel integration rather than anything in this factor.
+        //
+        // FRET ratios are unaffected, since a common factor cancels out of A/(D+A).
+        double norm = 4.0*Math.PI*spotSigma*spotSigma;
         int stepSize = Math.max(imageS.size()/100, 1);
         for (int i = 1; i <= imageS.size(); i++) {
             if (i%stepSize == 0){
@@ -150,42 +189,108 @@ public class smFRETAnalyzer implements Command {
 
             // Split, transform source to target and Gaussian smoothing.
             java.util.List<ImagePlus> splitImages = smfsf.splitImagePlus(tmp);
-            ImagePlus targetImgI = splitImages.get(0);
-            new ImageConverter(targetImgI).convertToGray32();
-            ImageProcessor targetImgIImp = targetImgI.getProcessor();
-            targetImgIImp.blurGaussian(spotSigma);
-
-            ImagePlus sourceImgI = splitImages.get(1);
-            new ImageConverter(sourceImgI).convertToGray32();
-            ImageProcessor sourceImgIImp = sourceImgI.getProcessor();
-            sourceImgIImp.blurGaussian(spotSigma);
+            smFRETSpotFinder.Shared targetImgI = smoothed(splitImages.get(0), spotSigma);
+            smFRETSpotFinder.Shared sourceImgI = smoothed(splitImages.get(1), spotSigma);
 
             // Gaussian smoothing of background.
-            ImagePlus targetImgIBg = new ImagePlus("tmp_fg", targetBg.getProcessor(i));
-            new ImageConverter(targetImgIBg).convertToGray32();
-            ImageProcessor targetImgIBgImp = targetImgIBg.getProcessor();
-            targetImgIBgImp.blurGaussian(spotSigma);
+            smFRETSpotFinder.Shared targetImgIBg = smoothed(targetBg.getProcessor(i), spotSigma);
+            smFRETSpotFinder.Shared sourceImgIBg = smoothed(sourceBg.getProcessor(i), spotSigma);
 
-            ImagePlus sourceImgIBg = new ImagePlus("tmp_bg", sourceBg.getProcessor(i));
-            new ImageConverter(sourceImgIBg).convertToGray32();
-            ImageProcessor sourceImgIBgImp = sourceImgIBg.getProcessor();
-            sourceImgIBgImp.blurGaussian(spotSigma);
-
-            // Record spot intensities in both channels.
+            // Record spot intensities in both channels. Reading the backing array directly is the
+            // same value ImageProcessor.getValue returned, without going through ImagePlus - but
+            // getValue handed back a double, so the subtraction has to be widened by hand. Left
+            // in float it lands 1e-4 away, which is nothing next to the signal and still enough
+            // to make this migration visible in the traces.
             for (int j = 0; j < spots.length; j++) {
                 int x = (int)spots[j][0];
                 int y = (int)spots[j][1];
+                int index = y * targetImgI.width + x;
 
-                timeTraces[2 * j][i - 1] = norm * cameraGain * (targetImgIImp.getValue(x, y) - targetImgIBgImp.getValue(x, y));
-                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * (sourceImgIImp.getValue(x, y) - sourceImgIBgImp.getValue(x, y));
-
-//                timeTraces[2 * j][i - 1] = norm * cameraGain * ((double) targetImgI.getPixel(x, y)[0] - (double) targetImgIBg.getPixel(x, y)[0]);
-//                timeTraces[2 * j + 1][i - 1] = norm * cameraGain * ((double) sourceImgI.getPixel(x, y)[0] - (double) sourceImgIBg.getPixel(x, y)[0]);
-
+                timeTraces[2 * j][i - 1] = norm * cameraGain
+                        * ((double) targetImgI.pixels[index] - (double) targetImgIBg.pixels[index]);
+                timeTraces[2 * j + 1][i - 1] = norm * cameraGain
+                        * ((double) sourceImgI.pixels[index] - (double) sourceImgIBg.pixels[index]);
             }
         }
 
         return timeTraces;
+    }
+
+    /**
+     * Mean of each pixel over a window windowFrames frames wide.
+     *
+     * windowFrames is the whole window, not a radius - "how many frames to average", which is what
+     * the parameter has always claimed to be. Filters3D took a *radius* on the z axis, so passing
+     * it 30 averaged 61 frames; this averages 30. An even width cannot sit symmetrically on a
+     * frame, so it leans one frame forward.
+     *
+     * The window shrinks at the ends of the movie rather than being filled with invented frames,
+     * which is the other FIXME this replaced: an out of bounds strategy would either repeat the
+     * first frame, weighting it several times over, or mirror the movie back on itself. Averaging
+     * only the frames that exist does neither, at the cost of a noisier estimate in the first and
+     * last half window - which is honest, since there is less data there.
+     *
+     * Carried as a running sum, so the cost is one pass over the movie rather than one pass per
+     * frame. Accumulated in double: a float sum drifts over the thousands of add-and-subtract
+     * rounds a long movie needs.
+     */
+    private ImageStack temporalMean(ImageStack stack, int windowFrames) {
+        int width = stack.getWidth();
+        int height = stack.getHeight();
+        int depth = stack.size();
+
+        int frames = Math.max(1, windowFrames);
+        int before = (frames - 1) / 2;
+        int after = frames - 1 - before;
+
+        Img<FloatType> movie = ImageJFunctions.convertFloat(new ImagePlus("movie", stack));
+        Img<DoubleType> sum = ArrayImgs.doubles(width, height);
+        ImageStack averaged = new ImageStack(width, height);
+
+        int low = 0;
+        int high = -1;
+        for (int z = 0; z < depth; z++) {
+            int wantLow = Math.max(0, z - before);
+            int wantHigh = Math.min(depth - 1, z + after);
+
+            while (high < wantHigh) {
+                high++;
+                RandomAccessibleInterval<FloatType> frame = Views.hyperSlice(movie, 2, high);
+                LoopBuilder.setImages(sum, frame).forEachPixel((s, f) -> s.set(s.get() + f.get()));
+            }
+            while (low < wantLow) {
+                RandomAccessibleInterval<FloatType> frame = Views.hyperSlice(movie, 2, low);
+                LoopBuilder.setImages(sum, frame).forEachPixel((s, f) -> s.set(s.get() - f.get()));
+                low++;
+            }
+
+            final double n = wantHigh - wantLow + 1;
+            Img<FloatType> mean = ArrayImgs.floats(width, height);
+            LoopBuilder.setImages(mean, sum).forEachPixel((m, s) -> m.set((float) (s.get() / n)));
+
+            averaged.addSlice(smFRETChannelMapper.toProcessor(mean));
+        }
+        return averaged;
+    }
+
+    /**
+     * A float copy of an image, smoothed at the spot scale.
+     *
+     * The blur is ImageJ1's, deliberately: Gauss3 differs from it by enough to move these traces,
+     * measured at 0.04 ADU at this sigma. Shared lets the blur run over the same array the rest
+     * of the pipeline reads as imglib2, so there is no conversion around it. The copy is what
+     * makes it safe to hand this a processor belonging to a stack.
+     */
+    private static smFRETSpotFinder.Shared smoothed(ImagePlus image, double sigma) {
+        return smoothed(image.getProcessor(), sigma);
+    }
+
+    private static smFRETSpotFinder.Shared smoothed(ImageProcessor image, double sigma) {
+        smFRETSpotFinder.Shared source = new smFRETSpotFinder.Shared(
+                (FloatProcessor) image.convertToFloatProcessor().duplicate());
+        smFRETSpotFinder.Shared blurred = new smFRETSpotFinder.Shared(source.width, source.height);
+        smFRETSpotFinder.gauss(sigma, Views.extendMirrorSingle(source.img), blurred.img);
+        return blurred;
     }
 
     /**
@@ -233,9 +338,7 @@ public class smFRETAnalyzer implements Command {
      * int16 (Short) - 2 * (length of traces) * (number of traces) in order [time][trace number].
      */
     private void saveToTracesFile(String tracesFileName, double [][] timeTraces){
-        try {
-            //DataOutputStream tracesDos = new DataOutputStream(new FileOutputStream(saveRootName + ".traces"));
-            LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(tracesFileName));
+        try (LittleEndianDataOutputStream tracesDos = new LittleEndianDataOutputStream(new FileOutputStream(tracesFileName))) {
             tracesDos.writeInt(timeTraces[0].length);   // Length of traces.
             tracesDos.writeShort(timeTraces.length / 2); // Number of traces.
 
@@ -258,9 +361,9 @@ public class smFRETAnalyzer implements Command {
         try {
             log.info("starting time trace measurement");
 
-            // Load spot JSON file w/ the analysis parameters.
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Object> mapping = mapper.readValue(spotJSONFile, HashMap.class);
+            // Load spot JSON file w/ the analysis parameters. A mapping JSON parses just as
+            // cleanly as this one, so the read checks for a key only the spot finder writes.
+            Map<String, Object> mapping = smFRETFiles.readSpotFinderJSON(spotJSONFile);
             saveRootName = (String) mapping.get("root name");
             String inputImageName = (String) mapping.get("image name");
             String mappingFileName = (String) mapping.get("mapping file");
@@ -274,27 +377,47 @@ public class smFRETAnalyzer implements Command {
 
             // Initialize spot finder object.
             smfsf.log = log;
-            smfsf.spotMargin = (Integer) mapping.get("spot margin");
-            smfsf.edgeMargin = (Integer) mapping.get("edge margin");
+            // Neither the spot margin nor the edge margin is set here any more.
+            // Both only ever mattered to background estimation, and that now
+            // takes its mask from the masks file and its smoothing from a
+            // constant, so nothing downstream of loadMasks reads either one.
+            // Absent from spot finder JSON written before background estimation changed, in
+            // which case the estimator's own default stands.
+            Object kappa = mapping.get("background kappa");
+            if (kappa != null) {
+                smfsf.backgroundKappa = ((Number) kappa).doubleValue();
+            }
             smfsf.loadMappingJSON(mappingFileName);
             smfsf.loadMasks(masksFileName);
             double[][] spots = smfsf.loadSpotLocations(spotsFileName);
             log.info("loaded " + spots.length + " spots");
 
-            // Load image to process.
-            ImagePlus image = new ImagePlus(inputImageName);
+            // Load image to process. Named by the JSON rather than chosen here, so the usual
+            // failure is a movie that has moved since spot finding ran.
+            ImagePlus image = smFRETFiles.openImage(inputImageName, "the image");
+            image = smFRETChannelMapper.toFloat(image);
 
             // Estimate background in the two image channels.
             log.info("estimating background in channels");
             java.util.List<ImagePlus> bgEstimates = backGroundEstimation(image);
 
-            ui.show(bgEstimates.get(0));
-            ui.show(bgEstimates.get(1));
-
             // Measure spot time traces.
             log.info("measuring time traces");
             double[][] timeTraces = measureTimeTraces(image, bgEstimates, spots, spotSigma, cameraGain);
             log.info(timeTraces.length + " " + timeTraces[0].length);
+
+            // The background estimates, shown only now. They used to appear as soon as the
+            // estimate finished, which is before the measurement that takes most of the run -
+            // two windows arriving while the plugin still had minutes of work left read as if
+            // it were done.
+            //
+            // Under diagnostic_mode along with the TIFs of these same two images, which is the
+            // flag it always should have been under: turning diagnostics off stopped the files
+            // being written but left the windows opening.
+            if (diagnostic_mode && !isHeadless) {
+                ui.show(bgEstimates.get(0));
+                ui.show(bgEstimates.get(1));
+            }
 
             // Save time traces in '.traces' format:
             if (saveAsTraces){
@@ -305,6 +428,10 @@ public class smFRETAnalyzer implements Command {
             saveToHDF5File(saveRootName + ".h5", timeTraces, spots);
 
             log.info("finishing time trace measurement");
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation, so the message is the whole of what is worth showing.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

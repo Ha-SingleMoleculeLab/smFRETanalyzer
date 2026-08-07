@@ -1,0 +1,3 @@
+# The versions these numbers were produced with. See tools/README.md.
+numpy==2.4.2
+tifffile==2026.2.24

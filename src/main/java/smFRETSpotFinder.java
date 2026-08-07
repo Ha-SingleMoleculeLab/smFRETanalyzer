@@ -1031,7 +1031,17 @@ public class smFRETSpotFinder implements Command, Interactive {
      * Load overlay and background masks.
      */
     public void loadMasks(String masksFileName){
-        ImagePlus masksImage = new ImagePlus(masksFileName);
+        File masksFile = (masksFileName == null) ? null : new File(masksFileName);
+        smFRETFiles.requireReadable(masksFile, "the masks image");
+
+        // Exactly two frames, the overlap mask and the background mask. Not "at least two", which
+        // a movie would satisfy.
+        ImagePlus masksImage = smFRETFiles.read(masksFile);
+        if ((masksImage.getProcessor() == null) || (masksImage.getStackSize() != 2)) {
+            throw new smFRETAnalysisException("Error: " + masksFileName + " "
+                    + smFRETFiles.isNot(masksFile, "the two frame masks image")
+                    + "." + smFRETFiles.MASKS_REMEDY);
+        }
 
         // Overlay mask.
         ImageProcessor ip = masksImage.getStack().getProcessor(1);
@@ -1046,22 +1056,36 @@ public class smFRETSpotFinder implements Command, Interactive {
      * Load spot locations as a double[][].
      */
     public double[][] loadSpotLocations(String spotsFileName){
-        try {
-            ResultsTable rt = ResultsTable.open2(spotsFileName);
-            double[][] spots = new double[rt.getCounter()][columnHeaders.size()];
-            log.info("column size " + columnHeaders.size());
+        File spotsFile = (spotsFileName == null) ? null : new File(spotsFileName);
+        smFRETFiles.requireSpotTable(spotsFile);
 
-            for (int i = 0; i < rt.getCounter(); i++) {
-                for (int j = 0; j < columnHeaders.size(); j++){
-                    spots[i][j] = rt.getValue(columnHeaders.get(j), i);
-                }
-            }
-            return spots;
+        ResultsTable rt;
+        try {
+            rt = ResultsTable.open2(spotsFileName);
         } catch (Exception e) {
-            log.info(e);
-            IJ.handleException(e);
+            throw new smFRETAnalysisException("Error: could not read " + spotsFileName
+                    + " as a spot table." + smFRETFiles.TABLE_REMEDY, e);
         }
-        return null;
+
+        // A table written before the SNR and prominence columns existed parses cleanly and then
+        // fails one getValue at a time, which reads as a bug rather than as a stale file.
+        for (String column : columnHeaders) {
+            if (rt.getColumnIndex(column) == ResultsTable.COLUMN_NOT_FOUND) {
+                throw new smFRETAnalysisException("Error: " + spotsFileName + " has no '" + column
+                        + "' column, so it was written by an older smFRET Spot Finder."
+                        + " Re-run spot finding to regenerate it.");
+            }
+        }
+
+        double[][] spots = new double[rt.getCounter()][columnHeaders.size()];
+        log.info("column size " + columnHeaders.size());
+
+        for (int i = 0; i < rt.getCounter(); i++) {
+            for (int j = 0; j < columnHeaders.size(); j++){
+                spots[i][j] = rt.getValue(columnHeaders.get(j), i);
+            }
+        }
+        return spots;
     }
 
     /**
@@ -1412,14 +1436,14 @@ public class smFRETSpotFinder implements Command, Interactive {
         }
         cachedInputs = null;
 
-        // Load the image to process.
-        ImagePlus inputImage = new ImagePlus(inputImageName.toString());
-        smFRETChannelMapper.requireGrayscale(inputImage, "the image " + inputImageName);
-        smFRETChannelMapper.requireTimeStack(inputImage, "the image " + inputImageName);
-        inputImage = smFRETChannelMapper.toFloat(inputImage);
-
-        // Load the channel to channel mapping file.
+        // Load the channel to channel mapping file. Before the image rather than after it, purely
+        // so that choosing the wrong JSON is reported straight away instead of after the movie has
+        // been read; nothing in the load depends on the mapping.
         loadMappingJSON(mappingFile.toString());
+
+        // Load the image to process.
+        ImagePlus inputImage = smFRETFiles.openImage(inputImageName, "the image");
+        inputImage = smFRETChannelMapper.toFloat(inputImage);
 
         // Average image.
         log.info("average image - " + smFRETChannelMapper.frameCount(inputImage) + " frames");
@@ -1608,6 +1632,11 @@ public class smFRETSpotFinder implements Command, Interactive {
             masksImageSaver.saveAsTiff(masksFileName);
 
 	        log.info("finishing spot finding");
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation - a wrong file, a wrong image type - so the message is
+            // the whole of what is worth showing. Anything else is unexpected and keeps its trace.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

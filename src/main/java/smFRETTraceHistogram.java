@@ -762,6 +762,11 @@ public class smFRETTraceHistogram implements Command {
      * Load the trace matrices from an smFRETAnalyzer H5 file.
      */
     void loadTraces(File file) {
+
+        // Checked before the HDF5 library is asked to open it, whose complaint about anything else
+        // is a library level error with a stack trace and no mention of which file was wrong.
+        smFRETFiles.requireHDF5(file);
+
         try (IHDF5Reader reader = HDF5Factory.openForReading(file)) {
             targetTraces = reader.readFloatMatrix("target-traces");
             sourceTraces = reader.readFloatMatrix("source-traces");
@@ -1252,6 +1257,10 @@ public class smFRETTraceHistogram implements Command {
 
             SwingUtilities.invokeLater(this::showWindow);
 
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation, so the message is the whole of what is worth showing.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

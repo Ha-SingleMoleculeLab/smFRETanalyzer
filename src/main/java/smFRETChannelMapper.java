@@ -282,10 +282,13 @@ public class smFRETChannelMapper implements Command {
      * before or after transformImagePlus stopped calling TurboReg.
      */
     public void loadMappingJSON(String mappingFileName) {
+
+        // Not caught here any more. This used to log the failure and return, which left
+        // transformModel null and turned "you chose the wrong JSON" into "Cannot transform image,
+        // transform model not set" several steps downstream - and there is no useful way to carry
+        // on without a transform, so the caller has to hear about it.
+        Map<String, Object> mapping = smFRETFiles.readMappingJSON(mappingFileName);
         try {
-            ObjectMapper mapper = new ObjectMapper();
-            File mappingFile = new File(mappingFileName);
-            Map<String, Object> mapping = mapper.readValue(mappingFile, HashMap.class);
             ArrayList<ArrayList <Double>> sourcePoints = (ArrayList) mapping.get("source points");
             ArrayList<ArrayList <Double>> targetPoints = (ArrayList) mapping.get("target points");
 
@@ -306,9 +309,15 @@ public class smFRETChannelMapper implements Command {
             model.set(affine[0], affine[1], affine[2], affine[3], affine[4], affine[5]);
             transformModel = model;
 
+        } catch (smFRETAnalysisException e) {
+            throw e;
         } catch (Exception e) {
-            log.info(e);
-            log.error(e);
+
+            // The file has the key, so it is a mapping, but something in it is not what a mapping
+            // holds - too few landmarks, or a size that is not a number.
+            throw new smFRETAnalysisException("Error: " + mappingFileName
+                    + " is a channel mapping JSON file but its contents could not be read."
+                    + " Re-run smFRET Channel Mapper to rewrite it.", e);
         }
     }
 
@@ -506,12 +515,9 @@ public class smFRETChannelMapper implements Command {
             }
             log.info("save root " + saveRootName);
 
-            // Load the image to process.
-            //Opener sourceOpener = new Opener();
-            //ImagePlus inputImage = sourceOpener.openImage(inputImageName.toString());
-            ImagePlus inputImage = new ImagePlus(inputImageName.toString());
-            requireGrayscale(inputImage, "the mapping image " + inputImageName);
-            requireTimeStack(inputImage, "the mapping image " + inputImageName);
+            // Load the image to process. openImage says what the file is when it is not an image
+            // at all, which is the mistake the file chooser cannot prevent.
+            ImagePlus inputImage = smFRETFiles.openImage(inputImageName, "the mapping image");
 
             // Everything past here is float. Converting once, here, is what lets the rest of
             // the pipeline stop asking what the camera produced.
@@ -657,6 +663,11 @@ public class smFRETChannelMapper implements Command {
 
             log.info("finishing channel mapping");
 
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation, so the message was written for the user and the stack
+            // trace below it would only bury the one line worth reading.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             log.error(e);

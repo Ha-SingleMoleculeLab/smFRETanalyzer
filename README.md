@@ -4,6 +4,18 @@ This is multipart FIJI/ImageJ plugin for analyzing single molecule FRET experime
 
 ## Documentation ##
 
+### Choosing the right input file
+
+Every file parameter checks what it was given before it uses it, and says what the file actually is when it is the wrong one - for example, choosing `hel1_spotf_finding.json` where the mapping was wanted gives
+
+> Error: .../hel1_spotf_finding.json is a spot finder JSON file, not a channel mapping JSON file. Choose the '_mapping.json' written by smFRET Channel Mapper.
+
+rather than a stack trace. This matters most for the two JSON files, which sit beside each other with the same extension and are told apart only by their contents.
+
+The **Browse** dialog does not filter by file type, and cannot: the file chooser SciJava provides for a single file takes no filter, and a path typed in by hand or passed by a macro would bypass it anyway. So the check happens when the plugin runs.
+
+The messages also cover a file that has moved or is empty, a movie that is RGB or colour indexed rather than grayscale, a stack with both depth and time, and a `_spotf_spots.csv` written before the SNR and prominence columns existed. Anything unexpected still reports with a stack trace, which is what the trace is for.
+
 ### smFRETChannelMapper
 
 This plugin is used to find an affine mapping between the donor/target and acceptor/source channels. The assumption is that this is a two channel FRET experiment with the donor/target channel on the left and the acceptor/source channel on the right.

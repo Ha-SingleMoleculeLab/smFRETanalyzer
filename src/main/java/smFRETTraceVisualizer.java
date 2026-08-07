@@ -16,7 +16,6 @@
 import ch.systemsx.cisd.hdf5.HDF5Factory;
 import ch.systemsx.cisd.hdf5.IHDF5Reader;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import ij.IJ;
 import ij.ImageListener;
@@ -39,7 +38,6 @@ import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
-import java.util.HashMap;
 import java.util.Map;
 
 
@@ -109,8 +107,10 @@ public class smFRETTraceVisualizer implements Command {
      * and the recorded value is only a fallback.
      */
     void load(File jsonFile) throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
-        Map<String, Object> mapping = mapper.readValue(jsonFile, HashMap.class);
+
+        // A mapping JSON parses just as cleanly as this one, so the read checks for a key only
+        // the spot finder writes rather than discovering the difference at the first missing name.
+        Map<String, Object> mapping = smFRETFiles.readSpotFinderJSON(jsonFile);
 
         String path = jsonFile.getAbsolutePath();
         String root = path.endsWith(JSON_SUFFIX)
@@ -143,6 +143,7 @@ public class smFRETTraceVisualizer implements Command {
         spots = smfsf.loadSpotLocations(spotsFile.toString());
         nSpots = spots.length;
 
+        smFRETFiles.requireHDF5(traceFile);
         try (IHDF5Reader reader = HDF5Factory.openForReading(traceFile)) {
             targetTraces = reader.readFloatMatrix("target-traces");
             sourceTraces = reader.readFloatMatrix("source-traces");
@@ -158,10 +159,8 @@ public class smFRETTraceVisualizer implements Command {
         }
         nFrames = Math.min(targetTraces[0].length, sourceTraces[0].length);
 
-        fieldImage = new ImagePlus(fieldFile.toString());
-        movie = new ImagePlus(imageFile.toString());
-        smFRETChannelMapper.requireGrayscale(movie, "the image " + imageFile);
-        smFRETChannelMapper.requireTimeStack(movie, "the image " + imageFile);
+        fieldImage = smFRETFiles.read(fieldFile);
+        movie = smFRETFiles.openImage(imageFile, "the image");
 
         log.info("loaded " + nSpots + " spots, " + nFrames + " frames, from " + root);
     }
@@ -830,6 +829,10 @@ public class smFRETTraceVisualizer implements Command {
 
             SwingUtilities.invokeLater(this::showWindows);
 
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation, so the message is the whole of what is worth showing.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

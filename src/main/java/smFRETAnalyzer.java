@@ -4,7 +4,6 @@
 
 import ch.systemsx.cisd.hdf5.HDF5Factory;
 import ch.systemsx.cisd.hdf5.IHDF5Writer;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.io.LittleEndianDataOutputStream;
 import ij.IJ;
 import ij.ImagePlus;
@@ -34,7 +33,6 @@ import java.io.FileOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Map;
 
 
@@ -363,9 +361,9 @@ public class smFRETAnalyzer implements Command {
         try {
             log.info("starting time trace measurement");
 
-            // Load spot JSON file w/ the analysis parameters.
-            ObjectMapper mapper = new ObjectMapper();
-            Map<String, Object> mapping = mapper.readValue(spotJSONFile, HashMap.class);
+            // Load spot JSON file w/ the analysis parameters. A mapping JSON parses just as
+            // cleanly as this one, so the read checks for a key only the spot finder writes.
+            Map<String, Object> mapping = smFRETFiles.readSpotFinderJSON(spotJSONFile);
             saveRootName = (String) mapping.get("root name");
             String inputImageName = (String) mapping.get("image name");
             String mappingFileName = (String) mapping.get("mapping file");
@@ -394,10 +392,9 @@ public class smFRETAnalyzer implements Command {
             double[][] spots = smfsf.loadSpotLocations(spotsFileName);
             log.info("loaded " + spots.length + " spots");
 
-            // Load image to process.
-            ImagePlus image = new ImagePlus(inputImageName);
-            smFRETChannelMapper.requireGrayscale(image, "the image " + inputImageName);
-            smFRETChannelMapper.requireTimeStack(image, "the image " + inputImageName);
+            // Load image to process. Named by the JSON rather than chosen here, so the usual
+            // failure is a movie that has moved since spot finding ran.
+            ImagePlus image = smFRETFiles.openImage(inputImageName, "the image");
             image = smFRETChannelMapper.toFloat(image);
 
             // Estimate background in the two image channels.
@@ -431,6 +428,10 @@ public class smFRETAnalyzer implements Command {
             saveToHDF5File(saveRootName + ".h5", timeTraces, spots);
 
             log.info("finishing time trace measurement");
+        } catch (smFRETAnalysisException e) {
+
+            // This plugin's own validation, so the message is the whole of what is worth showing.
+            smFRETFiles.report(log, e);
         } catch (Exception e) {
             log.info(e);
             IJ.handleException(e);

@@ -430,7 +430,21 @@ public class smFRETTraceHistogram implements Command {
 
             setPreferredSize(new Dimension(200, THUMB_SIZE + 8));
             setFocusable(true);
-            setToolTipText("Drag either end to resize the interval, drag the middle to slide it");
+
+            // The keys are worth more than the mouse on a long movie - a track a few hundred
+            // pixels wide cannot address every frame of it - and there is no way to discover
+            // them, nor that the slider has to be clicked first to take the focus, other than
+            // being told here. HTML because a tooltip does not otherwise wrap.
+            //
+            // Worded in steps rather than frames: both the frame interval and the intensity
+            // range are this same component.
+            setToolTipText("<html>Drag either end to resize the interval, "
+                    + "drag the middle to slide it.<br>"
+                    + "Click first, then:<br>"
+                    + "&nbsp;&nbsp;<b>\u2190</b> <b>\u2192</b> move the interval by one step<br>"
+                    + "&nbsp;&nbsp;<b>PgUp</b> <b>PgDn</b> move it a whole interval<br>"
+                    + "&nbsp;&nbsp;<b>Home</b> <b>End</b> jump to the start or the end<br>"
+                    + "&nbsp;&nbsp;<b>\u2191</b> <b>\u2193</b> resize it</html>");
 
             MouseAdapter mouse = new MouseAdapter() {
                 @Override
@@ -530,6 +544,18 @@ public class smFRETTraceHistogram implements Command {
                 slide(low - 1, width);
             } else if (keyCode == KeyEvent.VK_RIGHT) {
                 slide(low + 1, width);
+            } else if (keyCode == KeyEvent.VK_PAGE_UP) {
+
+                // A whole interval per press rather than a fixed number of frames, so each press
+                // lands on the next window that does not overlap this one. A fixed step would be
+                // either useless on a 1295 frame movie or far too coarse on a 30 frame one; this
+                // scales with whatever is being looked at.
+                //
+                // width + 1, not width: the interval is inclusive, so 10..14 is five frames and
+                // stepping by four would leave frame 14 in both windows.
+                slide(low - (width + 1), width);
+            } else if (keyCode == KeyEvent.VK_PAGE_DOWN) {
+                slide(low + (width + 1), width);
             } else if (keyCode == KeyEvent.VK_HOME) {
                 slide(minimum, width);
             } else if (keyCode == KeyEvent.VK_END) {

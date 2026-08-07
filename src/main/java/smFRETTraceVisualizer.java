@@ -20,6 +20,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import ij.IJ;
 import ij.ImagePlus;
+import ij.gui.ImageCanvas;
+import ij.gui.OvalRoi;
+import ij.gui.Overlay;
+import ij.gui.Roi;
 import ij.process.ImageProcessor;
 
 import org.scijava.command.Command;
@@ -77,9 +81,12 @@ public class smFRETTraceVisualizer implements Command {
     private int currentFrame = 1;
     private ZoomPanel donorPanel;
     private ImagePlus fieldImage;
-    private FieldPanel fieldPanel;
+
+    // The spots window, a real ImageJ window rather than a panel of ours - see showFieldWindow.
+    private ImagePlus fieldWindow;
     private JSlider frameSlider;
-    private final java.util.List<JFrame> frames = new java.util.ArrayList<>();
+    private boolean closing = false;
+    private JFrame traceFrame;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private ImagePlus movie;
     private int nFrames = 0;
@@ -280,68 +287,84 @@ public class smFRETTraceVisualizer implements Command {
     /**
      * The spots window: the image the spots were found in, with the spots on it.
      *
+     * A real ImageJ window rather than a panel drawing the image. A grey microscopy image in a
+     * plain Swing frame looks exactly like an ImageJ image window and supports none of it - no
+     * magnifier, no pan, no "+" to zoom, none of the Image menu - and reaching for those and
+     * finding nothing happens is worse than a window that never looked the part. Being an
+     * ImagePlus gets all of that for free, and the overlay scales with the zoom.
+     *
      * This is the spot finder's QC image rather than a frame of the movie, so it is the averaged
      * image at whatever spotChannel was chosen, and the spots sit where they were actually
      * found. A single frame would be far noisier and most spots would not be visible at all.
      */
-    private class FieldPanel extends JPanel {
+    private void showFieldWindow() {
+        ImageProcessor processor = fieldImage.getProcessor();
+        int width = processor.getWidth();
+        int height = processor.getHeight();
+        float[] pixels = new float[width * height];
+        for (int i = 0; i < pixels.length; i++) {
+            pixels[i] = processor.getf(i % width, i / width);
+        }
+        double[] range = displayRange(pixels, 0.005, 0.9995);
 
-        private final BufferedImage image;
-        private double scale = 1.0;
-        private int offsetX = 0;
-        private int offsetY = 0;
+        fieldWindow = new ImagePlus("smFRET spots - " + spotJSONFile.getName(), processor);
+        fieldWindow.setDisplayRange(range[0], range[1]);
+        updateFieldOverlay();
 
-        FieldPanel() {
-            ImageProcessor processor = fieldImage.getProcessor();
-            int width = processor.getWidth();
-            int height = processor.getHeight();
-            float[] pixels = new float[width * height];
-            for (int i = 0; i < pixels.length; i++) {
-                pixels[i] = processor.getf(i % width, i / width);
-            }
-            double[] range = displayRange(pixels, 0.005, 0.9995);
-            image = render(pixels, width, height, range[0], range[1]);
+        // ImagePlus.show rather than the UIService that smFRETSpotFinder shows its QC image
+        // through. Being an ij.gui.ImageWindow with ImageJ's toolbar attached is the whole point
+        // here, and going straight at ImageJ1 both guarantees that and needs no service injected,
+        // which is what lets this window be driven from a test.
+        fieldWindow.show();
 
-            setPreferredSize(new Dimension(Math.min(560, width * 2), Math.min(760, height * 2)));
-            setBackground(Color.BLACK);
-            addMouseListener(new MouseAdapter() {
+        // The canvas exists only once the window is up. ImageJ's own listeners stay attached, so
+        // the tools keep working and this only adds the selection on top of them.
+        ImageCanvas canvas = fieldWindow.getCanvas();
+        if (canvas != null) {
+            canvas.addMouseListener(new MouseAdapter() {
                 @Override
                 public void mousePressed(MouseEvent e) {
-                    selectNearest((e.getX() - offsetX) / scale, (e.getY() - offsetY) / scale);
+
+                    // Off screen coordinates, so a click lands on the right spot at any zoom or
+                    // scroll position rather than only at 100%.
+                    selectNearest(canvas.offScreenXD(e.getX()), canvas.offScreenYD(e.getY()));
                 }
             });
         }
-
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            Graphics2D g2 = (Graphics2D) g.create();
-
-            scale = Math.min((double) getWidth() / image.getWidth(),
-                    (double) getHeight() / image.getHeight());
-            int drawWidth = (int) Math.round(image.getWidth() * scale);
-            int drawHeight = (int) Math.round(image.getHeight() * scale);
-            offsetX = (getWidth() - drawWidth) / 2;
-            offsetY = (getHeight() - drawHeight) / 2;
-            g2.drawImage(image, offsetX, offsetY, drawWidth, drawHeight, null);
-
-            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int radius = Math.max(3, (int) Math.round(2.0 * spotSigma * scale));
-            for (int i = 0; i < nSpots; i++) {
-                int x = offsetX + (int) Math.round(spots[i][0] * scale);
-                int y = offsetY + (int) Math.round(spots[i][1] * scale);
-                if (i == selectedSpot) {
-                    g2.setColor(Color.YELLOW);
-                    g2.setStroke(new BasicStroke(2.0f));
-                    g2.drawOval(x - radius - 2, y - radius - 2, 2 * radius + 4, 2 * radius + 4);
-                } else {
-                    g2.setColor(new Color(70, 200, 120, 170));
-                    g2.setStroke(new BasicStroke(1.0f));
-                    g2.drawOval(x - radius, y - radius, 2 * radius, 2 * radius);
+        if (fieldWindow.getWindow() != null) {
+            fieldWindow.getWindow().addWindowListener(new WindowAdapter() {
+                @Override
+                public void windowClosed(WindowEvent e) {
+                    closeAll();
                 }
-            }
-            g2.dispose();
+            });
         }
+    }
+
+    /**
+     * Redraw the spot markers, with the selected one picked out.
+     *
+     * Not smFRETSpotFinder.getSpotOverlay: that one reads the flag prefixed spot layout, where x
+     * is column 1, and what is held here is the reloaded layout with x at column 0. It also
+     * draws every spot in one colour, and the point of this one is the selection.
+     */
+    private void updateFieldOverlay() {
+        if (fieldWindow == null) {
+            return;
+        }
+        double radius = Math.max(3.0, 2.0 * spotSigma);
+        Overlay overlay = new Overlay();
+        for (int i = 0; i < nSpots; i++) {
+            double x = spots[i][0] + 0.5;
+            double y = spots[i][1] + 0.5;
+            boolean chosen = (i == selectedSpot);
+            double r = chosen ? (radius + 2.0) : radius;
+            Roi roi = new OvalRoi(x - r, y - r, 2.0 * r, 2.0 * r);
+            roi.setStrokeColor(chosen ? Color.YELLOW : new Color(70, 200, 120));
+            roi.setStrokeWidth(chosen ? 2.0 : 1.0);
+            overlay.add(roi);
+        }
+        fieldWindow.setOverlay(overlay);
     }
 
     /**
@@ -581,7 +604,7 @@ public class smFRETTraceVisualizer implements Command {
         selectedSpot = index;
         measureZoomRange();
         updateZoom();
-        fieldPanel.repaint();
+        updateFieldOverlay();
         tracePanel.repaint();
         updateStatus();
     }
@@ -647,9 +670,6 @@ public class smFRETTraceVisualizer implements Command {
     private void showWindows() {
         String name = spotJSONFile.getName();
 
-        fieldPanel = new FieldPanel();
-        JFrame fieldFrame = frame("smFRET spots - " + name, fieldPanel);
-
         tracePanel = new TracePanel();
 
         donorPanel = new ZoomPanel("donor");
@@ -691,32 +711,30 @@ public class smFRETTraceVisualizer implements Command {
         traceContent.add(split, BorderLayout.CENTER);
         traceContent.add(controls, BorderLayout.SOUTH);
 
-        JFrame traceFrame = frame("smFRET traces - " + name, traceContent);
+        traceFrame = frame("smFRET traces - " + name, traceContent);
 
         // Either window closes both. Neither is any use on its own - the field has nothing to
         // report a selection to, and the traces have no way to change which spot they show.
-        WindowAdapter closeBoth = new WindowAdapter() {
+        traceFrame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
-                for (JFrame other : frames) {
-                    if (other != e.getWindow()) {
-                        other.dispose();
-                    }
-                }
+                closeAll();
             }
-        };
-        fieldFrame.addWindowListener(closeBoth);
-        traceFrame.addWindowListener(closeBoth);
+        });
+
+        // The field goes up first so that its window is on screen to place the other one beside.
+        showFieldWindow();
 
         Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
         int left = screen.x + 20;
         int top = screen.y + 20;
-        fieldFrame.setLocation(left, top);
-        traceFrame.setLocation(left + fieldFrame.getWidth() + 12, top);
-
-        for (JFrame each : frames) {
-            each.setVisible(true);
+        int fieldWidth = 520;
+        if ((fieldWindow != null) && (fieldWindow.getWindow() != null)) {
+            fieldWindow.getWindow().setLocation(left, top);
+            fieldWidth = fieldWindow.getWindow().getWidth();
         }
+        traceFrame.setLocation(left + fieldWidth + 12, top);
+        traceFrame.setVisible(true);
 
         updateStatus();
         if (nSpots > 0) {
@@ -725,14 +743,32 @@ public class smFRETTraceVisualizer implements Command {
     }
 
     /**
-     * showWindows() helper, one packed frame registered for group disposal.
+     * Take down both windows, from whichever of them was closed.
+     *
+     * Guarded against re-entering: closing the ImageJ window calls this, which disposes the
+     * trace frame, whose own listener calls this again.
+     */
+    private void closeAll() {
+        if (closing) {
+            return;
+        }
+        closing = true;
+        if (traceFrame != null) {
+            traceFrame.dispose();
+        }
+        if ((fieldWindow != null) && (fieldWindow.getWindow() != null)) {
+            fieldWindow.close();
+        }
+    }
+
+    /**
+     * showWindows() helper, one packed frame.
      */
     private JFrame frame(String title, JComponent content) {
         JFrame frame = new JFrame(title);
         frame.setDefaultCloseOperation(JFrame.DISPOSE_ON_CLOSE);
         frame.getContentPane().add(content);
         frame.pack();
-        frames.add(frame);
         return frame;
     }
 

@@ -105,7 +105,9 @@ Its input is the **spot finder JSON**, which names the image, the mapping and th
 
 #### Windows:
 
-**Spots** - The spot finding QC image with every spot circled. This is the averaged image at whatever SpotChannel was used, not a single frame, so the spots are actually visible. Click near a spot to select it; clicking away from any spot changes nothing. It keeps a window of its own because it is 256 x 512 and wants the height, and because picking one spot out of a crowded field needs it drawn large.
+**Spots** - The spot finding QC image with every spot circled. This is the averaged image at whatever SpotChannel was used, not a single frame, so the spots are actually visible. Click near a spot to select it; clicking away from any spot changes nothing.
+
+This is **a normal ImageJ image window**, not a panel of the plugin's own, so all of ImageJ works on it: the magnifier, '+' and '-', scrolling, Image > Adjust > Brightness/Contrast, the lookup tables, and anything else in the menus. Selection works with whatever tool is active, so a magnifier click both zooms and selects the spot you zoomed on, and the spot markers stay in the right place at any zoom because they are an ImageJ overlay. It opens at ImageJ's usual magnification for an image that size. Being an ImageJ window it can also be closed by ImageJ; doing so closes the traces window too.
 
 **Traces** - Everything that follows from the selection, in one window:
 

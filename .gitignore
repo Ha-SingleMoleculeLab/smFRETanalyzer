@@ -41,3 +41,9 @@ build/
 
 ### Mac OS ###
 .DS_Store
+# Machine specific dependency classpath for tools/, see tools/README.md
+tools/cp.txt
+
+### Python ###
+__pycache__/
+*.pyc

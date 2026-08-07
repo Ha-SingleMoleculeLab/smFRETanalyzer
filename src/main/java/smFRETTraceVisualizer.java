@@ -66,10 +66,6 @@ public class smFRETTraceVisualizer implements Command {
     private static final double FRET_MIN = -0.2;
     private static final double FRET_MAX = 1.2;
 
-    // Spot channel of a spot finder JSON written before the setting existed. That was the only
-    // behaviour then, so it is what such a file must mean.
-    private static final String DEFAULT_SPOT_CHANNEL = "sum";
-
     private static final Color ACCEPTOR_COLOR = new Color(200, 60, 40);
     private static final Color DONOR_COLOR = new Color(30, 140, 60);
     private static final Color FRET_COLOR = new Color(70, 115, 175);
@@ -97,19 +93,6 @@ public class smFRETTraceVisualizer implements Command {
     private float[][] sourceTraces;      // [spot][frame], acceptor.
     private double[][] spots;            // [spot][x, y, snr, prominence] - the reloaded layout.
     private double spotSigma = 2.0;
-
-    // What the zoom panels scale the spots window's display range by, so that adjusting
-    // Brightness/Contrast there adjusts them too: one over the number of channels that went into
-    // the image spots were found in. The QC image is the *sum* of both channels by default and
-    // each zoom shows one of them, which puts the whole intensity axis - background included -
-    // at half; at a spot channel of donor or acceptor the QC image is already one channel and
-    // the factor is 1.
-    //
-    // Structural rather than fitted to the images, deliberately. The measured medians are 0.603
-    // and 0.488 of the QC median on the example data, and they differ because the donor and the
-    // acceptor really are different brightnesses - calibrating that out would erase a real
-    // difference rather than correct a scale.
-    private double zoomContrastRatio = 0.5;
     private JLabel statusLabel;
     private float[][] targetTraces;      // [spot][frame], donor.
     private TracePanel tracePanel;
@@ -137,11 +120,6 @@ public class smFRETTraceVisualizer implements Command {
 
         spotSigma = ((Number) mapping.get("spot sigma")).doubleValue();
         zoomHalfWidth = Math.max(6, (int) Math.round(4.0 * spotSigma));
-
-        // Same test smFRETSpotFinder.channelCount makes, against the same recorded setting.
-        Object channel = mapping.get("spot channel");
-        String spotChannel = (channel == null) ? DEFAULT_SPOT_CHANNEL : String.valueOf(channel);
-        zoomContrastRatio = "sum".equals(spotChannel) ? 0.5 : 1.0;
 
         File spotsFile = locate((String) mapping.get("spots file"), jsonDir, root + "_spotf_spots.csv");
         File imageFile = locate((String) mapping.get("image name"), jsonDir, null);
@@ -185,9 +163,7 @@ public class smFRETTraceVisualizer implements Command {
         smFRETChannelMapper.requireGrayscale(movie, "the image " + imageFile);
         smFRETChannelMapper.requireTimeStack(movie, "the image " + imageFile);
 
-        log.info("loaded " + nSpots + " spots, " + nFrames + " frames, from " + root
-                + "; spots found in the " + spotChannel + " image, so the zoom panels take "
-                + zoomContrastRatio + " of the spot window's display range");
+        log.info("loaded " + nSpots + " spots, " + nFrames + " frames, from " + root);
     }
 
     /**
@@ -246,7 +222,7 @@ public class smFRETTraceVisualizer implements Command {
     }
 
     /**
-     * Take the display range from the spots window, scaled.
+     * Take the display range from the spots window, unchanged.
      *
      * One range for both panels and every spot and frame, so brightness still means the same
      * thing from frame to frame, between the two channels and from one spot to the next - which
@@ -254,13 +230,22 @@ public class smFRETTraceVisualizer implements Command {
      * used to be measured per spot by sampling frames off the movie; taking it from the field
      * instead keeps that property, puts it under Brightness/Contrast where it can be adjusted,
      * and drops the per selection sampling cost entirely.
+     *
+     * Taken as it stands, with no factor for the channel count. It is tempting to halve it when
+     * the spots were found in the sum, on the grounds that the sum is two channels and each of
+     * these panels is one - but that is only true of the *background*, which really is two
+     * backgrounds added. It is not true of a spot: a molecule's photons are split between the
+     * donor and the acceptor rather than duplicated into both, so at low FRET the donor carries
+     * almost the whole signal and its spot is as bright in one channel as in the sum. No single
+     * multiplicative factor maps both the background and the spot, and the spots are what these
+     * panels are for. Halving it blew out the core of a bright spot.
      */
     private void syncZoomRange() {
         if (fieldWindow == null) {
             return;
         }
-        double low = zoomContrastRatio * fieldWindow.getDisplayRangeMin();
-        double high = zoomContrastRatio * fieldWindow.getDisplayRangeMax();
+        double low = fieldWindow.getDisplayRangeMin();
+        double high = fieldWindow.getDisplayRangeMax();
         if (high <= low) {
             high = low + 1.0;
         }

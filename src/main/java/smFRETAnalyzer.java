@@ -61,7 +61,7 @@ public class smFRETAnalyzer implements Command {
     Integer backgroundAverageNFrames = 30;
 
     // Member variables.
-    private final boolean diagnostic_mode = true;
+    private final boolean diagnostic_mode = false;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private String saveRootName;
     private final boolean saveAsTraces = true;

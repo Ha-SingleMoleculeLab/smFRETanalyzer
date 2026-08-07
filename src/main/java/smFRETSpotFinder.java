@@ -273,7 +273,7 @@ public class smFRETSpotFinder implements Command, Interactive {
     // Member variables.
     public ImagePlus backgroundMask;
     public java.util.List<String> columnHeaders = Arrays.asList("x", "y", "snr", "prominence"); // the first two fields should always be "x","y".
-    private final boolean diagnostic_mode = true;
+    private final boolean diagnostic_mode = false;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     public ImagePlus overlapMask;
     private String saveRootName;

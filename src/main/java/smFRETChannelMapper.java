@@ -70,7 +70,7 @@ public class smFRETChannelMapper implements Command {
     Integer endSlice = 30;
 
     // Member variables.
-    private final boolean diagnostic_mode = true;
+    private final boolean diagnostic_mode = false;
     private final boolean isHeadless = GraphicsEnvironment.isHeadless();
     private int mapImageWidth = 0;              // Expected image width for the transform.
     private int mapImageHeight = 0;             // Expected image height for the transform.

@@ -105,14 +105,14 @@ Its input is the **spot finder JSON**, which names the image, the mapping and th
 
 #### Windows:
 
-**Spots** - The spot finding QC image with every spot circled. This is the averaged image at whatever SpotChannel was used, not a single frame, so the spots are actually visible. Click near a spot to select it; clicking away from any spot changes nothing.
+**Spots** - The spot finding QC image with every spot circled, in the same green circles at the same radius the spot finder's own QC window draws - the radius is `max(2, round(2.5 * SpotSigma))`, and the line stays one pixel wide however far you zoom in. The **selected** spot is the same circle in yellow. This is the averaged image at whatever SpotChannel was used, not a single frame, so the spots are actually visible. Click near a spot to select it; clicking away from any spot changes nothing.
 
 This is **a normal ImageJ image window**, not a panel of the plugin's own, so all of ImageJ works on it: the magnifier, '+' and '-', scrolling, Image > Adjust > Brightness/Contrast, the lookup tables, and anything else in the menus. Selection works with whatever tool is active, so a magnifier click both zooms and selects the spot you zoomed on, and the spot markers stay in the right place at any zoom because they are an ImageJ overlay. It opens at ImageJ's usual magnification for an image that size. Being an ImageJ window it can also be closed by ImageJ; doing so closes the traces window too.
 
 **Traces** - Everything that follows from the selection, in one window:
 
 * *Upper panel* - The selected spot's donor and acceptor intensities above, the FRET ratio below, sharing the frame axis. FRET is drawn over a fixed -0.2 to 1.2, the same range smFRETTraceHistogram uses, and is clamped to that range when the donor and acceptor sum is near zero and the ratio blows up - the status line marks such a value 'off scale' so it is clear why the number and the plot disagree. An orange line marks the frame the images below are showing.
-* *Lower panels* - The selected spot in the donor and acceptor channels side by side, at the selected frame, magnified, with a circle at 2 x SpotSigma. The acceptor is mapped onto the donor's coordinate frame, the same way smFRETAnalyzer measures it.
+* *Lower panels* - The selected spot in the donor and acceptor channels side by side, at the selected frame, magnified. The circle is the yellow one the field marks the selection with, at the same radius, since the selected spot is the only thing these panels ever show. The acceptor is mapped onto the donor's coordinate frame, the same way smFRETAnalyzer measures it.
 
   Their contrast **follows the spots window**: adjust Brightness/Contrast there, or run Enhance Contrast or Reset, and these follow immediately. They take that display range divided by **the number of channels that went into the image spots were found in** - so halved at the default SpotChannel of `sum`, because the spots window then shows both channels added together and each of these shows one of them, which puts the whole intensity axis including the background at half; and taken as-is at a SpotChannel of `donor` or `acceptor`, where the spots window is already a single channel. A spot finder JSON written before SpotChannel existed is read as `sum`, which is what it was.
 

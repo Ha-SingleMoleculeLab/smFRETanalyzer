@@ -394,22 +394,26 @@ public class smFRETTraceVisualizer implements Command {
      *
      * Not smFRETSpotFinder.getSpotOverlay: that one reads the flag prefixed spot layout, where x
      * is column 1, and what is held here is the reloaded layout with x at column 0. It also
-     * draws every spot in one colour, and the point of this one is the selection.
+     * draws every spot in one colour, and the point of this one is the selection. The radius and
+     * the colours do come from there, so the two cannot drift apart.
      */
     private void updateFieldOverlay() {
         if (fieldWindow == null) {
             return;
         }
-        double radius = Math.max(3.0, 2.0 * spotSigma);
+        double radius = smFRETSpotFinder.spotMarginFor(spotSigma);
         Overlay overlay = new Overlay();
         for (int i = 0; i < nSpots; i++) {
             double x = spots[i][0] + 0.5;
             double y = spots[i][1] + 0.5;
             boolean chosen = (i == selectedSpot);
-            double r = chosen ? (radius + 2.0) : radius;
-            Roi roi = new OvalRoi(x - r, y - r, 2.0 * r, 2.0 * r);
-            roi.setStrokeColor(chosen ? Color.YELLOW : new Color(70, 200, 120));
-            roi.setStrokeWidth(chosen ? 2.0 : 1.0);
+
+            // Colour alone marks the selection - same radius, and the stroke width left unset so
+            // ImageJ keeps the line one pixel wide however far in the window is zoomed. That is
+            // what the QC image's overlay does, and setting it is what made these look heavier.
+            Roi roi = new OvalRoi(x - radius, y - radius, 2.0 * radius, 2.0 * radius);
+            roi.setStrokeColor(chosen
+                    ? smFRETSpotFinder.selectedSpotColor : smFRETSpotFinder.spotColor);
             overlay.add(roi);
         }
         fieldWindow.setOverlay(overlay);
@@ -612,9 +616,11 @@ public class smFRETTraceVisualizer implements Command {
             double pixelSide = (double) side / size;
             int centre = (int) Math.round(offsetX + (zoomHalfWidth + 0.5) * pixelSide);
             int centreY = (int) Math.round(offsetY + (zoomHalfWidth + 0.5) * pixelSide);
-            int marker = (int) Math.round(2.0 * spotSigma * pixelSide);
+            // The same radius and the same colour the field marks the selected spot with, since
+            // the selected spot is the only thing these panels ever show.
+            int marker = (int) Math.round(smFRETSpotFinder.spotMarginFor(spotSigma) * pixelSide);
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g2.setColor(new Color(255, 230, 40, 190));
+            g2.setColor(smFRETSpotFinder.selectedSpotColor);
             g2.drawOval(centre - marker, centreY - marker, 2 * marker, 2 * marker);
 
             g2.setColor(Color.WHITE);

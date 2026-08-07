@@ -149,7 +149,17 @@ public class smFRETSpotFinder implements Command, Interactive {
     private static final int spotMarginFloor = 2;
 
     private int spotMargin() {
-        return Math.max(spotMarginFloor, (int) Math.round(spotMarginScale * spotSigma));
+        return spotMarginFor(spotSigma);
+    }
+
+    /**
+     * The same radius for a caller that has a spot size but not a spot finder.
+     *
+     * Exposed so that smFRETTraceVisualizer, which draws the same circles over the same image,
+     * cannot drift away from the QC image's - see spotColor.
+     */
+    public static int spotMarginFor(double sigma) {
+        return Math.max(spotMarginFloor, (int) Math.round(spotMarginScale * sigma));
     }
 
     @Parameter (description = "background clipping threshold, 0 to derive it from the spot size", min = "0.0")
@@ -976,6 +986,13 @@ public class smFRETSpotFinder implements Command, Interactive {
      *  //               CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
      *  //               INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES.
      */
+    // One look for a spot marker wherever one gets drawn, here or in smFRETTraceVisualizer:
+    // green for a spot, yellow for the one that is currently selected, and the stroke width
+    // deliberately left alone. Setting it makes ImageJ scale the line with the magnification, so
+    // an overlay that sets it looks heavier than one that does not as soon as anybody zooms in.
+    public static final Color spotColor = Color.GREEN;
+    public static final Color selectedSpotColor = Color.YELLOW;
+
     public static Overlay getSpotOverlay (double[][] spots, int radius, Color symbolColor) {
         Overlay ov = new Overlay();
         double diameter = 2.0 * (double)radius;
@@ -1524,7 +1541,7 @@ public class smFRETSpotFinder implements Command, Interactive {
             log.info("after prominence filter " + countGoodSpots(filteredSpots));
 
             // display as overlay on sum image.
-            Overlay ov = getSpotOverlay(filteredSpots, spotMargin(), Color.GREEN);
+            Overlay ov = getSpotOverlay(filteredSpots, spotMargin(), spotColor);
             sumImage.setOverlay(ov);
 
             // One window, updated in place. Showing a new one per run would leave a window per
